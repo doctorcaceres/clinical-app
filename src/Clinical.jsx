@@ -195,13 +195,18 @@ async function transcribeAudio(audioBlob, apiKey) {
 // Claude: generate note from transcript
 // ============================================================
 
-async function generateNote(encounterType, transcript) {
+async function generateNote(encounterType, transcript, anthropicKey) {
   const sections = encounterType === "new" ? NEW_PATIENT_SECTIONS : FOLLOW_UP_SECTIONS;
 
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": anthropicKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
         max_tokens: 4000,
@@ -417,21 +422,30 @@ function NoteSection({ title, content, onEdit }) {
 // Setup Screen — enter Deepgram API key
 // ============================================================
 
-function SetupScreen({ onComplete, existingKey }) {
-  const [key, setKey] = useState(existingKey || "");
+function SetupScreen({ onComplete, existingDgKey, existingAnKey }) {
+  const [dgKey, setDgKey] = useState(existingDgKey || "");
+  const [anKey, setAnKey] = useState(existingAnKey || "");
   const [saving, setSaving] = useState(false);
 
+  const bothFilled = dgKey.trim() && anKey.trim();
+
   const handleSave = async () => {
-    if (!key.trim()) return;
+    if (!bothFilled) return;
     setSaving(true);
     try {
-      await new Promise(r => setTimeout(r, 0));
-      localStorage.setItem("deepgram_api_key", key.trim());
-    } catch (e) {
-      // Storage might not be available, that's OK — key is in state
-    }
+      localStorage.setItem("deepgram_api_key", dgKey.trim());
+      localStorage.setItem("anthropic_api_key", anKey.trim());
+    } catch (e) {}
     setSaving(false);
-    onComplete(key.trim());
+    onComplete(dgKey.trim(), anKey.trim());
+  };
+
+  const inputStyle = {
+    width: "100%", maxWidth: 320, padding: "14px 16px",
+    backgroundColor: "#111", border: "2px solid #333",
+    borderRadius: 12, color: "#FAFAFA", fontSize: 15,
+    fontFamily: "inherit", outline: "none",
+    boxSizing: "border-box",
   };
 
   return (
@@ -451,43 +465,53 @@ function SetupScreen({ onComplete, existingKey }) {
       }} />
 
       <div style={{
-        fontSize: 15, color: "#888", marginBottom: 8,
-        textAlign: "center", lineHeight: 1.5, maxWidth: 320,
+        fontSize: 13, color: "#888", marginBottom: 6,
+        textAlign: "left", width: "100%", maxWidth: 320,
       }}>
-        Enter your Deepgram API key
+        Deepgram key (listening)
       </div>
-      <div style={{
-        fontSize: 13, color: "#555", marginBottom: 24,
-        textAlign: "center", lineHeight: 1.5, maxWidth: 320,
-      }}>
-        Get it at deepgram.com — you get $200 in free credit.
-      </div>
-
       <input
         type="password"
-        value={key}
-        onChange={(e) => setKey(e.target.value)}
-        placeholder="Paste your API key here"
-        style={{
-          width: "100%", maxWidth: 320, padding: "14px 16px",
-          backgroundColor: "#111", border: "2px solid #333",
-          borderRadius: 12, color: "#FAFAFA", fontSize: 15,
-          fontFamily: "inherit", outline: "none",
-          boxSizing: "border-box",
-        }}
+        value={dgKey}
+        onChange={(e) => setDgKey(e.target.value)}
+        placeholder="Paste Deepgram API key"
+        style={inputStyle}
         onFocus={(e) => e.target.style.borderColor = "#00CFA0"}
         onBlur={(e) => e.target.style.borderColor = "#333"}
       />
 
+      <div style={{
+        fontSize: 13, color: "#888", marginBottom: 6, marginTop: 20,
+        textAlign: "left", width: "100%", maxWidth: 320,
+      }}>
+        Anthropic key (note writing)
+      </div>
+      <input
+        type="password"
+        value={anKey}
+        onChange={(e) => setAnKey(e.target.value)}
+        placeholder="Paste Anthropic API key"
+        style={inputStyle}
+        onFocus={(e) => e.target.style.borderColor = "#00CFA0"}
+        onBlur={(e) => e.target.style.borderColor = "#333"}
+      />
+
+      <div style={{
+        fontSize: 12, color: "#444", marginTop: 12,
+        textAlign: "center", lineHeight: 1.5, maxWidth: 320,
+      }}>
+        One-time setup. These stay on your phone.
+      </div>
+
       <button
         onClick={handleSave}
-        disabled={!key.trim() || saving}
+        disabled={!bothFilled || saving}
         style={{
           marginTop: 20, padding: "14px 48px", borderRadius: 12,
           border: "none",
-          backgroundColor: key.trim() ? "#00CFA0" : "#333",
-          color: key.trim() ? "#0A0A0A" : "#666",
-          fontSize: 16, fontWeight: 600, cursor: key.trim() ? "pointer" : "default",
+          backgroundColor: bothFilled ? "#00CFA0" : "#333",
+          color: bothFilled ? "#0A0A0A" : "#666",
+          fontSize: 16, fontWeight: 600, cursor: bothFilled ? "pointer" : "default",
           fontFamily: "inherit", letterSpacing: "0.03em",
           transition: "all 0.2s ease",
         }}
@@ -622,6 +646,7 @@ export default function Clinical() {
   const [noteData, setNoteData] = useState(null);
   const [trainingDone, setTrainingDone] = useState(false);
   const [deepgramKey, setDeepgramKey] = useState(null);
+  const [anthropicKey, setAnthropicKey] = useState(null);
   const [genStage, setGenStage] = useState(0);
 
   const mediaRecorderRef = useRef(null);
@@ -637,9 +662,11 @@ export default function Clinical() {
   useEffect(() => {
     (async () => {
       try {
-        const savedKey = localStorage.getItem("deepgram_api_key");
-        if (savedKey) {
-          setDeepgramKey(savedKey);
+        const savedDgKey = localStorage.getItem("deepgram_api_key");
+        const savedAnKey = localStorage.getItem("anthropic_api_key");
+        if (savedDgKey && savedAnKey) {
+          setDeepgramKey(savedDgKey);
+          setAnthropicKey(savedAnKey);
           setState(STATES.SELECT);
         }
       } catch (e) {
@@ -765,7 +792,7 @@ export default function Clinical() {
       await new Promise(r => setTimeout(r, 300));
       setGenStage(3); // Writing note
 
-      const note = await generateNote(encounterType, transcript);
+      const note = await generateNote(encounterType, transcript, anthropicKey);
       if (note) {
         setNoteData(note);
         setState(STATES.NOTE);
@@ -777,7 +804,7 @@ export default function Clinical() {
       setError(`Error: ${err.message}. Tap the record button to try again.`);
       setState(STATES.IDLE);
     }
-  }, [stopTimer, encounterType, deepgramKey]);
+  }, [stopTimer, encounterType, deepgramKey, anthropicKey]);
 
   const resetSession = useCallback(() => {
     setElapsed(0);
@@ -795,9 +822,11 @@ export default function Clinical() {
   if (state === STATES.SETUP) {
     return (
       <SetupScreen
-        existingKey={deepgramKey}
-        onComplete={(key) => {
-          setDeepgramKey(key);
+        existingDgKey={deepgramKey}
+        existingAnKey={anthropicKey}
+        onComplete={(dgKey, anKey) => {
+          setDeepgramKey(dgKey);
+          setAnthropicKey(anKey);
           setState(STATES.SELECT);
         }}
       />
