@@ -1,6 +1,50 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 
-const STATES = { SETUP: "setup", SELECT: "select", IDLE: "idle", RECORDING: "recording", PAUSED: "paused", GENERATING: "generating", NOTE: "note" };
+// ============================================================
+// Supabase connection
+// ============================================================
+const SUPABASE_URL = "https://rtrzaketgvdggdfhedsn.supabase.co";
+const SUPABASE_KEY = "sb_publishable_zPQZ7Zl03zjS_uqvsNb-ug_JzgohYw2";
+
+async function supabaseRequest(path, method = "GET", body = null) {
+  const options = {
+    method,
+    headers: {
+      "apikey": SUPABASE_KEY,
+      "Authorization": `Bearer ${SUPABASE_KEY}`,
+      "Content-Type": "application/json",
+      "Prefer": method === "POST" ? "return=representation" : undefined,
+    },
+  };
+  if (body) options.body = JSON.stringify(body);
+  // Clean undefined headers
+  Object.keys(options.headers).forEach(k => options.headers[k] === undefined && delete options.headers[k]);
+  const res = await fetch(`${SUPABASE_URL}/rest/v1${path}`, options);
+  if (!res.ok) throw new Error(`Supabase error: ${res.status}`);
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
+}
+
+async function saveEncounter(encounter) {
+  const rows = await supabaseRequest("/encounters", "POST", encounter);
+  return rows?.[0] || null;
+}
+
+async function updateEncounter(id, updates) {
+  await supabaseRequest(`/encounters?id=eq.${id}`, "PATCH", updates);
+}
+
+async function getRecentEncounters() {
+  return await supabaseRequest("/encounters?order=created_at.desc&limit=20");
+}
+
+async function getLearningData() {
+  // Get encounters where the user made corrections (final_note differs from original_note)
+  const encounters = await supabaseRequest("/encounters?final_note=not.is.null&order=created_at.desc&limit=10");
+  return encounters || [];
+}
+
+const STATES = { SETUP: "setup", SELECT: "select", IDLE: "idle", RECORDING: "recording", PAUSED: "paused", GENERATING: "generating", NOTE: "note", NOTES: "notes" };
 
 // ============================================================
 // THE BRAIN — Dr. Caceres' writing style and note structure
@@ -198,6 +242,36 @@ async function transcribeAudio(audioBlob, apiKey) {
 async function generateNote(encounterType, transcript, anthropicKey) {
   const sections = encounterType === "new" ? NEW_PATIENT_SECTIONS : FOLLOW_UP_SECTIONS;
 
+  // Fetch past corrections to learn from
+  let learningContext = "";
+  try {
+    const pastEncounters = await getLearningData();
+    if (pastEncounters.length > 0) {
+      const corrections = pastEncounters
+        .filter(e => e.original_note && e.final_note && JSON.stringify(e.original_note) !== JSON.stringify(e.final_note))
+        .slice(0, 3) // Use up to 3 recent corrections
+        .map(e => {
+          const diffs = [];
+          const orig = e.original_note;
+          const final_v = e.final_note;
+          for (const key of Object.keys(orig)) {
+            if (final_v[key] && orig[key] !== final_v[key]) {
+              diffs.push(`Section "${key}":\nAI wrote: "${orig[key].substring(0, 200)}..."\nDoctor corrected to: "${final_v[key].substring(0, 200)}..."`);
+            }
+          }
+          return diffs.join("\n\n");
+        })
+        .filter(d => d.length > 0);
+
+      if (corrections.length > 0) {
+        learningContext = `\n\nIMPORTANT - LEARN FROM THESE PAST CORRECTIONS. The doctor corrected the following in previous notes. Adjust your writing to match what the doctor prefers:\n\n${corrections.join("\n---\n")}`;
+      }
+    }
+  } catch (e) {
+    // Learning data fetch failed, continue without it
+    console.log("Could not fetch learning data:", e);
+  }
+
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -210,7 +284,7 @@ async function generateNote(encounterType, transcript, anthropicKey) {
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
         max_tokens: 4000,
-        system: STYLE_PROMPT,
+        system: STYLE_PROMPT + learningContext,
         messages: [
           {
             role: "user",
@@ -526,7 +600,7 @@ function SetupScreen({ onComplete, existingDgKey, existingAnKey }) {
 // Note Review Screen
 // ============================================================
 
-function NoteReview({ encounterType, elapsed, noteData, onNewEncounter }) {
+function NoteReview({ encounterType, elapsed, noteData, encounterId, onNewEncounter }) {
   const [note, setNote] = useState(noteData);
   const [saved, setSaved] = useState(false);
 
@@ -543,11 +617,19 @@ function NoteReview({ encounterType, elapsed, noteData, onNewEncounter }) {
     window.open(`mailto:?subject=${subject}&body=${body}`, "_self");
   };
 
-  const handleSaveFinal = () => {
-    const finalNote = { ...note };
-    const originalNote = { ...noteData };
-    console.log("LEARNING DATA:", { original: originalNote, corrected: finalNote, encounterType });
+  const handleSaveFinal = async () => {
     setSaved(true);
+    try {
+      if (encounterId) {
+        await updateEncounter(encounterId, {
+          final_note: note,
+          status: "finalized",
+          updated_at: new Date().toISOString(),
+        });
+      }
+    } catch (e) {
+      console.error("Failed to save final note:", e);
+    }
     setTimeout(() => setSaved(false), 3000);
   };
 
@@ -635,6 +717,103 @@ function NoteReview({ encounterType, elapsed, noteData, onNewEncounter }) {
 }
 
 // ============================================================
+// Recent Notes — for viewing/editing notes on desktop
+// ============================================================
+
+function RecentNotes({ onBack, onOpenNote }) {
+  const [encounters, setEncounters] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const data = await getRecentEncounters();
+        setEncounters(data || []);
+      } catch (e) {
+        console.error("Failed to load encounters:", e);
+      }
+      setLoading(false);
+    })();
+  }, []);
+
+  const formatDate = (dateStr) => {
+    const d = new Date(dateStr);
+    return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+  };
+
+  return (
+    <div style={{
+      minHeight: "100vh", backgroundColor: "#0A0A0A", color: "#FAFAFA",
+      fontFamily: "'SF Pro Display', -apple-system, BlinkMacSystemFont, sans-serif",
+    }}>
+      <div style={{
+        position: "sticky", top: 0, zIndex: 10,
+        backgroundColor: "#0A0A0A",
+        borderBottom: "1px solid #1a1a1a",
+        padding: "16px 20px",
+        paddingTop: "calc(env(safe-area-inset-top, 16px) + 16px)",
+        display: "flex", justifyContent: "space-between", alignItems: "center",
+      }}>
+        <h1 style={{
+          fontSize: 20, fontWeight: 600, letterSpacing: "0.1em",
+          textTransform: "uppercase", margin: 0,
+        }}>Recent Notes</h1>
+        <button onClick={onBack} style={{
+          fontSize: 14, color: "#00CFA0", background: "none",
+          border: "none", cursor: "pointer", fontFamily: "inherit",
+        }}>Back</button>
+      </div>
+
+      <div style={{ padding: "12px 20px" }}>
+        {loading && (
+          <div style={{ textAlign: "center", color: "#555", padding: 40, fontSize: 15 }}>
+            Loading...
+          </div>
+        )}
+
+        {!loading && encounters.length === 0 && (
+          <div style={{ textAlign: "center", color: "#555", padding: 40, fontSize: 15 }}>
+            No encounters yet. Record your first one on your phone.
+          </div>
+        )}
+
+        {encounters.map(enc => (
+          <button
+            key={enc.id}
+            onClick={() => onOpenNote(enc)}
+            style={{
+              width: "100%", padding: "16px", marginBottom: 8,
+              backgroundColor: "#111", border: "1px solid #1a1a1a",
+              borderRadius: 12, cursor: "pointer", textAlign: "left",
+              fontFamily: "inherit", display: "flex", justifyContent: "space-between",
+              alignItems: "center",
+            }}
+          >
+            <div>
+              <div style={{
+                fontSize: 11, fontWeight: 500, letterSpacing: "0.1em",
+                textTransform: "uppercase",
+                color: enc.status === "finalized" ? "#555" : "#00CFA0",
+                marginBottom: 4,
+              }}>
+                {enc.encounter_type === "new" ? "New Patient" : "Follow Up"}
+                {enc.status === "finalized" && " • Finalized"}
+              </div>
+              <div style={{ fontSize: 14, color: "#ccc" }}>
+                {enc.original_note?.["Chief Concern"] || enc.original_note?.["Interval History"]?.substring(0, 60) + "..." || "Note"}
+              </div>
+            </div>
+            <div style={{ fontSize: 12, color: "#555", whiteSpace: "nowrap", marginLeft: 12 }}>
+              {formatDate(enc.created_at)}
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
 // Main App
 // ============================================================
 
@@ -644,6 +823,7 @@ export default function Clinical() {
   const [elapsed, setElapsed] = useState(0);
   const [error, setError] = useState(null);
   const [noteData, setNoteData] = useState(null);
+  const [encounterId, setEncounterId] = useState(null);
   const [trainingDone, setTrainingDone] = useState(false);
   const [deepgramKey, setDeepgramKey] = useState(null);
   const [anthropicKey, setAnthropicKey] = useState(null);
@@ -794,6 +974,19 @@ export default function Clinical() {
 
       const note = await generateNote(encounterType, transcript, anthropicKey);
       if (note) {
+        // Save to Supabase
+        try {
+          const saved = await saveEncounter({
+            encounter_type: encounterType,
+            transcript: transcript,
+            original_note: note,
+            elapsed: elapsed,
+            status: "review",
+          });
+          if (saved) setEncounterId(saved.id);
+        } catch (e) {
+          console.error("Failed to save encounter:", e);
+        }
         setNoteData(note);
         setState(STATES.NOTE);
       } else {
@@ -813,6 +1006,7 @@ export default function Clinical() {
     analyserRef.current = null;
     setEncounterType(null);
     setNoteData(null);
+    setEncounterId(null);
     setError(null);
     setGenStage(0);
     setState(STATES.SELECT);
@@ -840,7 +1034,24 @@ export default function Clinical() {
         encounterType={encounterType}
         elapsed={elapsed}
         noteData={noteData}
+        encounterId={encounterId}
         onNewEncounter={resetSession}
+      />
+    );
+  }
+
+  // Recent notes screen (desktop)
+  if (state === STATES.NOTES) {
+    return (
+      <RecentNotes
+        onBack={() => setState(STATES.SELECT)}
+        onOpenNote={(enc) => {
+          setEncounterType(enc.encounter_type);
+          setElapsed(enc.elapsed || 0);
+          setNoteData(enc.final_note || enc.original_note);
+          setEncounterId(enc.id);
+          setState(STATES.NOTE);
+        }}
       />
     );
   }
@@ -953,6 +1164,26 @@ export default function Clinical() {
                 <circle cx="8" cy="11" r="0.75" fill="currentColor"/>
               </svg>
               Training Mode
+            </button>
+
+            <button onClick={() => setState(STATES.NOTES)}
+              style={{
+                padding: "20px 32px", backgroundColor: "transparent",
+                border: "2px solid #222", borderRadius: 16, color: "#888",
+                fontSize: 15, fontWeight: 500, letterSpacing: "0.05em",
+                cursor: "pointer", transition: "all 0.2s ease", fontFamily: "inherit",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.borderColor = "#00CFA0"; e.currentTarget.style.color = "#00CFA0"; e.currentTarget.style.backgroundColor = "rgba(0, 207, 160, 0.05)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.borderColor = "#222"; e.currentTarget.style.color = "#888"; e.currentTarget.style.backgroundColor = "transparent"; }}
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <rect x="2" y="2" width="12" height="12" rx="2" stroke="currentColor" strokeWidth="1.5" fill="none"/>
+                <line x1="5" y1="5.5" x2="11" y2="5.5" stroke="currentColor" strokeWidth="1.2"/>
+                <line x1="5" y1="8" x2="11" y2="8" stroke="currentColor" strokeWidth="1.2"/>
+                <line x1="5" y1="10.5" x2="9" y2="10.5" stroke="currentColor" strokeWidth="1.2"/>
+              </svg>
+              Recent Notes
             </button>
           </div>
         )}
