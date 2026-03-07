@@ -670,8 +670,11 @@ function NoteReview({ encounterType, elapsed, noteData, encounterId, onNewEncoun
       </div>
 
       <div style={{ padding: "8px 20px 140px" }}>
-        {Object.entries(note).map(([section, content]) => (
-          <NoteSection key={section} title={section} content={content} onEdit={handleEdit} />
+        {(encounterType === "new"
+          ? ["Chief Concern", "History of Present Illness", "Review of Systems", "Past Medical History", "Family History", "Birth History", "Developmental History", "Social History", "Assessment", "Plan"]
+          : ["Date of Last Visit", "Summary from Last Visit", "Interval History", "Assessment", "Plan"]
+        ).filter(section => note[section]).map(section => (
+          <NoteSection key={section} title={section} content={note[section]} onEdit={handleEdit} />
         ))}
       </div>
 
