@@ -197,6 +197,10 @@ Speaker 1: Sounds good. Thank you doctor.`;
 
 async function transcribeAudio(audioBlob, apiKey) {
   try {
+    // For very large files (>25MB), we need to compress or warn
+    const sizeMB = audioBlob.size / (1024 * 1024);
+    console.log(`Audio size: ${sizeMB.toFixed(1)} MB`);
+
     const response = await fetch(
       "https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&diarize=true&punctuate=true&utterances=true",
       {
@@ -210,20 +214,18 @@ async function transcribeAudio(audioBlob, apiKey) {
     );
 
     if (!response.ok) {
-      const errData = await response.json().catch(() => ({}));
-      throw new Error(errData.err_msg || `Deepgram error: ${response.status}`);
+      const errText = await response.text().catch(() => "");
+      throw new Error(`Deepgram error ${response.status}: ${errText.substring(0, 100)}`);
     }
 
     const data = await response.json();
 
-    // Build transcript with speaker labels from utterances
     if (data.results?.utterances && data.results.utterances.length > 0) {
       return data.results.utterances
         .map(u => `Speaker ${u.speaker}: ${u.transcript}`)
         .join("\n");
     }
 
-    // Fallback: use the basic transcript without speaker labels
     if (data.results?.channels?.[0]?.alternatives?.[0]?.transcript) {
       return data.results.channels[0].alternatives[0].transcript;
     }
@@ -273,6 +275,13 @@ async function generateNote(encounterType, transcript, anthropicKey) {
   }
 
   try {
+    // Truncate very long transcripts to avoid hitting API limits
+    // 45+ minutes of conversation can be very long
+    let processedTranscript = transcript;
+    if (transcript.length > 50000) {
+      processedTranscript = transcript.substring(0, 50000) + "\n\n[Transcript truncated due to length. Focus on the content provided above.]";
+    }
+
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -283,16 +292,21 @@ async function generateNote(encounterType, transcript, anthropicKey) {
       },
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
-        max_tokens: 4000,
+        max_tokens: 8000,
         system: STYLE_PROMPT + learningContext,
         messages: [
           {
             role: "user",
-            content: `Here is the transcript of a ${encounterType === "new" ? "new patient" : "follow-up"} encounter:\n\n${transcript}\n\n${sections}\n\nGenerate the clinical note now. Return ONLY the JSON object, no backticks or markdown.`
+            content: `Here is the transcript of a ${encounterType === "new" ? "new patient" : "follow-up"} encounter:\n\n${processedTranscript}\n\n${sections}\n\nGenerate the clinical note now. Return ONLY the JSON object, no backticks or markdown.`
           }
         ],
       })
     });
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => "");
+      throw new Error(`Claude API error ${response.status}: ${errText.substring(0, 100)}`);
+    }
 
     const data = await response.json();
     const text = data.content
@@ -840,6 +854,7 @@ export default function Clinical() {
   const timerRef = useRef(null);
   const startTimeRef = useRef(0);
   const pausedTimeRef = useRef(0);
+  const wakeLockRef = useRef(null);
 
   // Load saved API key on mount
   useEffect(() => {
@@ -898,6 +913,12 @@ export default function Clinical() {
       pausedTimeRef.current = 0;
       setState(STATES.RECORDING);
       startTimer();
+      // Keep screen on during recording
+      try {
+        if ('wakeLock' in navigator) {
+          wakeLockRef.current = await navigator.wakeLock.request('screen');
+        }
+      } catch (e) {}
     } catch (err) {
       // Mic blocked — allow flow for demo
       chunksRef.current = [];
@@ -926,6 +947,14 @@ export default function Clinical() {
 
   const stopRecording = useCallback(async () => {
     stopTimer();
+
+    // Release wake lock
+    try {
+      if (wakeLockRef.current) {
+        await wakeLockRef.current.release();
+        wakeLockRef.current = null;
+      }
+    } catch (e) {}
 
     // Collect audio blob before stopping
     const hasAudio = chunksRef.current.length > 0 && mediaRecorderRef.current;
