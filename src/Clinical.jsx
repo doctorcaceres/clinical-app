@@ -492,63 +492,34 @@ export default function Clinical() {
       setState(STATES.PROCESSING); setTimeout(() => { setTrainingDone(true); setElapsed(0); setEncounterType(null); setState(STATES.SELECT); }, 1500); return;
     }
 
+    const encId = sessionEncounterIdRef.current;
+    if (!encId || encounterType === "training") return;
+
     setState(STATES.PROCESSING); setProcessStage("saving");
 
+    // ALL non-blocking: fire everything and show Done IMMEDIATELY
+    // The server will wait a few seconds for the final chunk to arrive
+
+    // 1. Upload final chunk — best effort, don't await
+    uploadChunksToServer().catch(() => {});
+
+    // 2. Update encounter status — best effort, don't await
+    updateEncounter(encId, { elapsed, status: "processing" }).catch(() => {});
+
+    // 3. Tell server to process — keepalive ensures request completes even if app closes
     try {
-      const encId = sessionEncounterIdRef.current;
+      fetch("/api/process-recording", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ encounter_id: encId, encounter_type: encounterType, anthropic_key: anthropicKey }),
+        keepalive: true,
+      });
+    } catch {}
 
-      // 1. Flush any remaining chunks to server
-      if (encId) {
-        await uploadChunksToServer();
-        // Update encounter with elapsed time
-        await updateEncounter(encId, { elapsed, status: "processing" });
-      }
-
-      // 2. Verify chunks actually exist on server before triggering processing
-      if (encId) {
-        let chunksExist = false;
-        try {
-          const checkRes = await supabaseRequest(`/recording_chunks?encounter_id=eq.${encId}&select=id&limit=1`);
-          chunksExist = checkRes && checkRes.length > 0;
-        } catch {}
-
-        if (chunksExist) {
-          // Server-side transcription + note generation — FIRE AND FORGET
-          fetch("/api/process-recording", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ encounter_id: encId, encounter_type: encounterType, anthropic_key: anthropicKey }),
-          }).catch(() => {});
-          setNoteSent(true);
-        } else {
-          // Fallback: chunks failed to upload, do client-side transcription
-          console.warn("No chunks on server, falling back to client-side transcription");
-          setProcessStage("transcribing");
-          const audioBlob = new Blob(chunksRef.current, { type: "audio/webm" });
-          const dgKey = localStorage.getItem("deepgram_api_key");
-          if (audioBlob.size > 0 && dgKey) {
-            const transcript = await transcribeAudio(audioBlob, dgKey);
-            await updateEncounter(encId, { transcript, status: "processing" });
-            fetch("/api/generate-note", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ encounter_id: encId, transcript, encounter_type: encounterType, anthropic_key: anthropicKey }),
-            }).catch(() => {});
-            setNoteSent(true);
-          } else {
-            throw new Error("No audio recorded");
-          }
-        }
-      }
-
-      // 3. Done — phone is free, server handles the rest
-      await idbClear();
-      setProcessStage("done");
-
-    } catch(err) {
-      setError(`Error: ${err.message}`);
-      setState(STATES.IDLE);
-    }
+    // 4. Done — phone is free NOW. Server handles the rest.
+    setNoteSent(true);
+    idbClear().catch(() => {});
+    setProcessStage("done");
   }, [stopTimer, encounterType, anthropicKey, elapsed, uploadChunksToServer]);
 
   const recoverRecording = useCallback(async () => {
