@@ -24,6 +24,43 @@ async function getLearningData() { const e = await supabaseRequest("/encounters?
 const STATES = { SETUP: "setup", SELECT: "select", IDLE: "idle", RECORDING: "recording", PAUSED: "paused", PROCESSING: "processing", NOTE: "note", NOTES: "notes" };
 
 // ============================================================
+// IndexedDB — crash-safe audio chunk storage
+// ============================================================
+const IDB_NAME = "clinical_recording";
+const IDB_STORE = "chunks";
+function openIDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => { const db = req.result; if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE); };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbSaveChunks(chunks, meta) {
+  const db = await openIDB();
+  const tx = db.transaction(IDB_STORE, "readwrite");
+  const store = tx.objectStore(IDB_STORE);
+  store.put(chunks, "audioChunks");
+  store.put(meta, "meta");
+  return new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = reject; });
+}
+async function idbLoadRecovery() {
+  try {
+    const db = await openIDB();
+    const tx = db.transaction(IDB_STORE, "readonly");
+    const store = tx.objectStore(IDB_STORE);
+    const [chunks, meta] = await Promise.all([
+      new Promise(r => { const req = store.get("audioChunks"); req.onsuccess = () => r(req.result); req.onerror = () => r(null); }),
+      new Promise(r => { const req = store.get("meta"); req.onsuccess = () => r(req.result); req.onerror = () => r(null); }),
+    ]);
+    return chunks && meta ? { chunks, meta } : null;
+  } catch { return null; }
+}
+async function idbClear() {
+  try { const db = await openIDB(); const tx = db.transaction(IDB_STORE, "readwrite"); tx.objectStore(IDB_STORE).clear(); } catch {}
+}
+
+// ============================================================
 // Deepgram
 // ============================================================
 async function transcribeAudio(audioBlob, apiKey) {
@@ -302,35 +339,99 @@ export default function Clinical() {
   const [processStage, setProcessStage] = useState("transcribing");
   const [noteSent, setNoteSent] = useState(false);
 
+  const [recovery, setRecovery] = useState(null);
+
   const mediaRecorderRef = useRef(null); const streamRef = useRef(null); const analyserRef = useRef(null);
   const audioCtxRef = useRef(null); const chunksRef = useRef([]); const timerRef = useRef(null);
   const startTimeRef = useRef(0); const pausedTimeRef = useRef(0); const wakeLockRef = useRef(null);
+  const saveIntervalRef = useRef(null); const isRecordingRef = useRef(false); const encounterTypeRef = useRef(null);
 
   useEffect(() => { try { const dg = localStorage.getItem("deepgram_api_key"); const an = localStorage.getItem("anthropic_api_key"); if (dg && an) { setDeepgramKey(dg); setAnthropicKey(an); setState(STATES.SELECT); } } catch(e){} }, []);
+
+  // Check for crash recovery on startup
+  useEffect(() => {
+    idbLoadRecovery().then(data => { if (data) setRecovery(data); });
+  }, []);
 
   const startTimer = useCallback(() => { startTimeRef.current = Date.now() - pausedTimeRef.current*1000; timerRef.current = setInterval(() => setElapsed(Math.floor((Date.now()-startTimeRef.current)/1000)), 200); }, []);
   const stopTimer = useCallback(() => clearInterval(timerRef.current), []);
   const selectType = (type) => { setEncounterType(type); setTrainingDone(false); setNoteSent(false); setState(STATES.IDLE); };
 
+  // Persist chunks to IndexedDB so recording survives app suspension
+  const saveChunksToIDB = useCallback(async () => {
+    if (chunksRef.current.length === 0) return;
+    try {
+      const blobs = chunksRef.current.map(c => c instanceof Blob ? c : new Blob([c], { type: "audio/webm" }));
+      const buffers = await Promise.all(blobs.map(b => b.arrayBuffer()));
+      await idbSaveChunks(buffers, {
+        encounterType: encounterTypeRef.current,
+        elapsed: Math.floor((Date.now() - startTimeRef.current) / 1000),
+        savedAt: Date.now(),
+      });
+    } catch {}
+  }, []);
+
+  // Re-acquire wake lock (iOS releases it when screen dims)
+  const acquireWakeLock = useCallback(async () => {
+    try { if ('wakeLock' in navigator) wakeLockRef.current = await navigator.wakeLock.request('screen'); } catch {}
+  }, []);
+
+  // Visibility change: save chunks when hidden, re-acquire wake lock when visible
+  useEffect(() => {
+    const handler = async () => {
+      if (!isRecordingRef.current) return;
+      if (document.visibilityState === "hidden") {
+        await saveChunksToIDB();
+      } else {
+        await acquireWakeLock();
+        // Check if MediaRecorder died while hidden
+        const mr = mediaRecorderRef.current;
+        if (mr && mr.state === "inactive") {
+          // MediaRecorder was killed by OS — stop gracefully with what we have
+          stopTimer();
+          try { if (wakeLockRef.current) { await wakeLockRef.current.release(); wakeLockRef.current = null; } } catch {}
+          if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+          if (audioCtxRef.current) try { audioCtxRef.current.close(); } catch {}
+          isRecordingRef.current = false;
+          clearInterval(saveIntervalRef.current);
+          setError("Recording was interrupted by the phone. Your audio has been saved — processing now.");
+          // Process what we have
+          const recovery = await idbLoadRecovery();
+          if (recovery) {
+            setRecovery(recovery);
+            setState(STATES.SELECT);
+          } else {
+            setState(STATES.IDLE);
+          }
+        }
+      }
+    };
+    document.addEventListener("visibilitychange", handler);
+    return () => document.removeEventListener("visibilitychange", handler);
+  }, [saveChunksToIDB, acquireWakeLock, stopTimer]);
+
   const startRecording = useCallback(async () => {
     try {
-      setError(null);
+      setError(null); setRecovery(null); await idbClear();
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation:true, noiseSuppression:true, sampleRate:44100 } });
       streamRef.current = stream;
       const actx = new (window.AudioContext||window.webkitAudioContext)(); audioCtxRef.current = actx;
       const src = actx.createMediaStreamSource(stream); const ana = actx.createAnalyser(); ana.fftSize=256; ana.smoothingTimeConstant=0.7; src.connect(ana); analyserRef.current = ana;
       const mr = new MediaRecorder(stream, { mimeType:"audio/webm" }); mediaRecorderRef.current = mr; chunksRef.current = [];
       mr.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
-      mr.start(1000); pausedTimeRef.current = 0; setState(STATES.RECORDING); startTimer();
-      try { if ('wakeLock' in navigator) wakeLockRef.current = await navigator.wakeLock.request('screen'); } catch(e){}
+      mr.start(1000); pausedTimeRef.current = 0; isRecordingRef.current = true; encounterTypeRef.current = encounterType;
+      setState(STATES.RECORDING); startTimer();
+      await acquireWakeLock();
+      // Save chunks to IndexedDB every 30 seconds
+      saveIntervalRef.current = setInterval(saveChunksToIDB, 30000);
     } catch(err) { chunksRef.current = []; pausedTimeRef.current = 0; setState(STATES.RECORDING); startTimer(); }
-  }, [startTimer]);
+  }, [startTimer, acquireWakeLock, saveChunksToIDB, encounterType]);
 
   const pauseRecording = useCallback(() => { if (mediaRecorderRef.current?.state==="recording") { mediaRecorderRef.current.pause(); pausedTimeRef.current=elapsed; stopTimer(); setState(STATES.PAUSED); } }, [elapsed, stopTimer]);
   const resumeRecording = useCallback(() => { if (mediaRecorderRef.current?.state==="paused") { mediaRecorderRef.current.resume(); startTimer(); setState(STATES.RECORDING); } }, [startTimer]);
 
   const stopRecording = useCallback(async () => {
-    stopTimer();
+    stopTimer(); isRecordingRef.current = false; clearInterval(saveIntervalRef.current);
     try { if (wakeLockRef.current) { await wakeLockRef.current.release(); wakeLockRef.current=null; } } catch(e){}
     const hasAudio = chunksRef.current.length > 0 && mediaRecorderRef.current;
     if (mediaRecorderRef.current?.state !== "inactive") try { mediaRecorderRef.current.stop(); } catch(e){}
@@ -369,7 +470,8 @@ export default function Clinical() {
         setNoteSent(true);
       }
 
-      // 4. Done — show success, user can move on
+      // 4. Done — clear recovery data, show success
+      await idbClear();
       setProcessStage("done");
 
     } catch(err) {
@@ -377,6 +479,23 @@ export default function Clinical() {
       setState(STATES.IDLE);
     }
   }, [stopTimer, encounterType, deepgramKey, anthropicKey, elapsed]);
+
+  const recoverRecording = useCallback(async () => {
+    if (!recovery || !deepgramKey || !anthropicKey) return;
+    setState(STATES.PROCESSING); setProcessStage("transcribing"); setError(null);
+    try {
+      const blob = new Blob(recovery.chunks.map(b => new Blob([b], { type: "audio/webm" })), { type: "audio/webm" });
+      const eType = recovery.meta.encounterType || "new";
+      setEncounterType(eType); setElapsed(recovery.meta.elapsed || 0);
+      const transcript = await transcribeAudio(blob, deepgramKey);
+      setProcessStage("saving");
+      const savedEnc = await saveEncounter({ encounter_type: eType, transcript, elapsed: recovery.meta.elapsed || 0, status: "processing" });
+      if (savedEnc) { setEncounterId(savedEnc.id); fetch("/api/generate-note", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ encounter_id: savedEnc.id, transcript, encounter_type: eType, anthropic_key: anthropicKey }) }).catch(() => {}); setNoteSent(true); }
+      await idbClear(); setRecovery(null); setProcessStage("done");
+    } catch (err) { setError(`Recovery error: ${err.message}`); setState(STATES.SELECT); }
+  }, [recovery, deepgramKey, anthropicKey]);
+
+  const dismissRecovery = useCallback(async () => { await idbClear(); setRecovery(null); }, []);
 
   const reset = useCallback(() => {
     setElapsed(0); pausedTimeRef.current=0; chunksRef.current=[]; analyserRef.current=null;
@@ -403,6 +522,18 @@ export default function Clinical() {
       <div style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", width:"100%", maxWidth:400, gap:32 }}>
         {isSel && (
           <div style={{ display:"flex", flexDirection:"column", gap:16, width:"100%", maxWidth:300, animation:"fadeIn 0.6s ease" }}>
+            {recovery && (
+              <div style={{ padding:"16px", backgroundColor:"rgba(255,71,87,0.08)", border:"1px solid rgba(255,71,87,0.3)", borderRadius:12, marginBottom:4, animation:"fadeIn 0.5s ease" }}>
+                <div style={{ fontSize:14, fontWeight:600, color:"#FF4757", marginBottom:6 }}>Recording recovered</div>
+                <div style={{ fontSize:13, color:"#999", marginBottom:12, lineHeight:1.4 }}>
+                  Found a {recovery.meta.encounterType === "new" ? "new patient" : "follow-up"} recording ({formatTime(recovery.meta.elapsed || 0)}) that was interrupted. Process it now?
+                </div>
+                <div style={{ display:"flex", gap:8 }}>
+                  <button onClick={recoverRecording} style={{ flex:1, padding:"10px", borderRadius:8, border:"none", backgroundColor:"#FF4757", color:"#fff", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:"inherit" }}>Recover & Process</button>
+                  <button onClick={dismissRecovery} style={{ padding:"10px 14px", borderRadius:8, border:"1px solid #444", backgroundColor:"transparent", color:"#888", fontSize:13, cursor:"pointer", fontFamily:"inherit" }}>Dismiss</button>
+                </div>
+              </div>
+            )}
             {trainingDone && <div style={{ textAlign:"center", padding:"12px 16px", backgroundColor:"rgba(255,159,67,0.08)", borderRadius:12, marginBottom:4, fontSize:14, color:"#FF9F43", animation:"fadeIn 0.5s ease" }}>Training session saved</div>}
             {noteSent && <div style={{ textAlign:"center", padding:"12px 16px", backgroundColor:"rgba(0,207,160,0.08)", borderRadius:12, marginBottom:4, fontSize:14, color:"#00CFA0", animation:"fadeIn 0.5s ease" }}>Note is being written. Check Recent Notes.</div>}
             {["new","followup"].map(type => (
