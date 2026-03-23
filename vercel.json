@@ -1,0 +1,11 @@
+{
+  "framework": "vite",
+  "functions": {
+    "api/generate-note.js": {
+      "maxDuration": 300
+    }
+  },
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "/api/:path*" }
+  ]
+}
