@@ -18,6 +18,7 @@ async function supabaseRequest(path, method = "GET", body = null) {
 async function saveEncounter(encounter) { const rows = await supabaseRequest("/encounters", "POST", encounter); return rows?.[0] || null; }
 async function updateEncounter(id, updates) { await supabaseRequest(`/encounters?id=eq.${id}`, "PATCH", updates); }
 async function getRecentEncounters() { return await supabaseRequest("/encounters?order=created_at.desc&limit=20"); }
+async function deleteEncounter(id) { await supabaseRequest(`/encounters?id=eq.${id}`, "DELETE"); }
 async function getLearningData() { const e = await supabaseRequest("/encounters?final_note=not.is.null&order=created_at.desc&limit=10"); return e || []; }
 
 const STATES = { SETUP: "setup", SELECT: "select", IDLE: "idle", RECORDING: "recording", PAUSED: "paused", PROCESSING: "processing", NOTE: "note", NOTES: "notes" };
@@ -225,7 +226,7 @@ function NoteReview({ encounterType, elapsed, noteData, encounterId, onNewEncoun
 // Recent Notes
 // ============================================================
 function RecentNotes({ onBack, onOpenNote, anthropicKey }) {
-  const [encounters, setEncounters] = useState([]); const [loading, setLoading] = useState(true); const [generating, setGenerating] = useState(null);
+  const [encounters, setEncounters] = useState([]); const [loading, setLoading] = useState(true); const [generating, setGenerating] = useState(null); const [deleting, setDeleting] = useState(null);
   const load = async () => { try { const d = await getRecentEncounters(); setEncounters(d||[]); } catch(e){} setLoading(false); };
   useEffect(() => { load(); const i = setInterval(load, 5000); return () => clearInterval(i); }, []);
 
@@ -238,6 +239,13 @@ function RecentNotes({ onBack, onOpenNote, anthropicKey }) {
       await updateEncounter(enc.id, { original_note: note, status: "review", updated_at: new Date().toISOString() });
     } catch(e) { try { await updateEncounter(enc.id, { status: "error" }); } catch(e2){} }
     setGenerating(null); load();
+  };
+
+  const handleDelete = async (enc) => {
+    if (!window.confirm("Delete this encounter? This cannot be undone.")) return;
+    setDeleting(enc.id);
+    try { await deleteEncounter(enc.id); } catch(e) {}
+    setDeleting(null); load();
   };
 
   const fmt = (d) => new Date(d).toLocaleDateString("en-US", { month:"short", day:"numeric", hour:"numeric", minute:"2-digit" });
@@ -268,6 +276,7 @@ function RecentNotes({ onBack, onOpenNote, anthropicKey }) {
                 {hasNote && <button onClick={() => onOpenNote(enc)} style={{ padding:"8px 16px", borderRadius:8, border:"1px solid #333", backgroundColor:"transparent", color:"#FAFAFA", fontSize:13, cursor:"pointer", fontFamily:"inherit" }}>Open</button>}
                 {(err || (!hasNote && !proc && !isGen && enc.transcript)) && <button onClick={() => handleGen(enc)} style={{ padding:"8px 16px", borderRadius:8, border:"1px solid #FF9F43", backgroundColor:"transparent", color:"#FF9F43", fontSize:13, cursor:"pointer", fontFamily:"inherit" }}>{err ? "Retry" : "Generate Note"}</button>}
                 {(proc||isGen) && <div style={{ padding:"8px 16px", fontSize:13, color:"#FF9F43", display:"flex", alignItems:"center", gap:6 }}><div style={{ width:8, height:8, borderRadius:"50%", backgroundColor:"#FF9F43", animation:"breathe 2s ease-in-out infinite" }} />Processing</div>}
+                <button onClick={() => handleDelete(enc)} disabled={deleting===enc.id} style={{ marginLeft:"auto", padding:"8px 16px", borderRadius:8, border:"1px solid #FF4757", backgroundColor:"transparent", color:"#FF4757", fontSize:13, cursor: deleting===enc.id ? "default" : "pointer", fontFamily:"inherit", opacity: deleting===enc.id ? 0.5 : 1 }}>{deleting===enc.id ? "Deleting..." : "Delete"}</button>
               </div>
             </div>
           );
