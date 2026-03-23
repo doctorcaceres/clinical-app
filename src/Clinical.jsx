@@ -264,17 +264,24 @@ function NoteReview({ encounterType, elapsed, noteData, encounterId, onNewEncoun
 // ============================================================
 function RecentNotes({ onBack, onOpenNote, anthropicKey }) {
   const [encounters, setEncounters] = useState([]); const [loading, setLoading] = useState(true); const [generating, setGenerating] = useState(null); const [deleting, setDeleting] = useState(null);
+  const [genError, setGenError] = useState(null);
   const load = async () => { try { const d = await getRecentEncounters(); setEncounters(d||[]); } catch(e){} setLoading(false); };
   useEffect(() => { load(); const i = setInterval(load, 5000); return () => clearInterval(i); }, []);
 
   const handleGen = async (enc) => {
-    if (!enc.transcript || !anthropicKey) return;
-    setGenerating(enc.id);
+    if (!anthropicKey) { alert("Anthropic API key not found. Go back and re-enter your keys."); return; }
+    if (!enc.transcript) { alert("No transcript found for this encounter. The recording may not have been processed."); return; }
+    setGenerating(enc.id); setGenError(null);
     try {
       await updateEncounter(enc.id, { status: "processing" });
       const note = await generateNoteLocally(enc.encounter_type, enc.transcript, anthropicKey);
       await updateEncounter(enc.id, { original_note: note, status: "review", updated_at: new Date().toISOString() });
-    } catch(e) { try { await updateEncounter(enc.id, { status: "error" }); } catch(e2){} }
+    } catch(e) {
+      console.error("Note generation failed:", e.message);
+      setGenError(e.message);
+      alert("Note generation failed: " + e.message);
+      try { await updateEncounter(enc.id, { status: "error" }); } catch(e2){}
+    }
     setGenerating(null); load();
   };
 
@@ -305,7 +312,7 @@ function RecentNotes({ onBack, onOpenNote, anthropicKey }) {
                   <div style={{ fontSize:11, fontWeight:500, letterSpacing:"0.1em", textTransform:"uppercase", color: proc||isGen||enc.status==="recording" ? "#FF9F43" : err ? "#FF4757" : enc.status==="finalized" ? "#555" : "#00CFA0", marginBottom:4 }}>
                     {enc.encounter_type === "new" ? "New Patient" : "Follow Up"}{enc.status==="recording" && " • Recording"}{(proc||isGen) && " • Processing..."}{err && " • Error"}{enc.status==="finalized" && " • Finalized"}
                   </div>
-                  <div style={{ fontSize:14, color:"#ccc" }}>{hasNote ? (enc.original_note?.["Chief Concern"] || enc.original_note?.["Interval History"]?.substring(0,60)+"..." || "Note") : enc.status==="recording" ? "Recording in progress..." : proc||isGen ? "Transcribing and writing note..." : "Transcript saved"}</div>
+                  <div style={{ fontSize:14, color:"#ccc" }}>{hasNote ? (enc.original_note?.["Chief Concern"] || enc.original_note?.["Interval History"]?.substring(0,60)+"..." || "Note") : enc.status==="recording" ? "Recording in progress..." : proc||isGen ? "Transcribing and writing note..." : err && enc.transcript ? "Transcript saved — tap Retry" : err ? "Failed — no transcript captured" : enc.transcript ? "Transcript saved" : "Waiting for processing..."}</div>
                 </div>
                 <div style={{ fontSize:12, color:"#555", whiteSpace:"nowrap", marginLeft:12 }}>{fmt(enc.created_at)}</div>
               </div>
