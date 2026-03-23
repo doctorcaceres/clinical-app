@@ -27,7 +27,7 @@ const STATES = { SETUP: "setup", SELECT: "select", IDLE: "idle", RECORDING: "rec
 // Deepgram
 // ============================================================
 async function transcribeAudio(audioBlob, apiKey) {
-  const response = await fetch("https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&diarize=true&punctuate=true&utterances=true", {
+  const response = await fetch("https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&diarize=true&punctuate=true&utterances=true&detect_language=true", {
     method: "POST", headers: { "Authorization": `Token ${apiKey}`, "Content-Type": audioBlob.type || "audio/webm" }, body: audioBlob,
   });
   if (!response.ok) { const t = await response.text().catch(() => ""); throw new Error(`Deepgram error ${response.status}: ${t.substring(0, 100)}`); }
