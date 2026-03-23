@@ -162,7 +162,7 @@ function PulseRing({ active }) { return <div style={{ position:"absolute", inset
 function ProcessingScreen({ stage, onDone }) {
   const [dots, setDots] = useState("");
   useEffect(() => { const i = setInterval(() => setDots(d => d.length >= 3 ? "" : d + "."), 500); return () => clearInterval(i); }, []);
-  const msgs = { transcribing: "Transcribing your conversation", saving: "Saving to database", done: "Done! Note is being written on the server." };
+  const msgs = { transcribing: "Transcribing your conversation", saving: "Uploading audio to server", done: "Done! Your note is being transcribed and written." };
   return (
     <div style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:24, animation:"fadeIn 0.5s ease" }}>
       {stage !== "done" ? (
@@ -177,7 +177,7 @@ function ProcessingScreen({ stage, onDone }) {
       </div>
       {stage === "done" && (
         <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:8, animation:"fadeIn 0.5s ease" }}>
-          <div style={{ fontSize:13, color:"#555", textAlign:"center" }}>Check Recent Notes for your finished note.</div>
+          <div style={{ fontSize:13, color:"#555", textAlign:"center" }}>The server is transcribing and writing your note. Check Recent Notes.</div>
           <button onClick={onDone} style={{ marginTop:12, padding:"14px 40px", borderRadius:12, border:"none", backgroundColor:"#00CFA0", color:"#0A0A0A", fontSize:15, fontWeight:600, cursor:"pointer", fontFamily:"inherit" }}>
             Home
           </button>
@@ -302,10 +302,10 @@ function RecentNotes({ onBack, onOpenNote, anthropicKey }) {
             <div key={enc.id} style={{ padding:"16px", marginBottom:8, backgroundColor:"#111", border:`1px solid ${err?"#FF4757":"#1a1a1a"}`, borderRadius:12 }}>
               <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
                 <div style={{ flex:1 }}>
-                  <div style={{ fontSize:11, fontWeight:500, letterSpacing:"0.1em", textTransform:"uppercase", color: proc||isGen ? "#FF9F43" : err ? "#FF4757" : enc.status==="finalized" ? "#555" : "#00CFA0", marginBottom:4 }}>
-                    {enc.encounter_type === "new" ? "New Patient" : "Follow Up"}{(proc||isGen) && " • Writing..."}{err && " • Error"}{enc.status==="finalized" && " • Finalized"}
+                  <div style={{ fontSize:11, fontWeight:500, letterSpacing:"0.1em", textTransform:"uppercase", color: proc||isGen||enc.status==="recording" ? "#FF9F43" : err ? "#FF4757" : enc.status==="finalized" ? "#555" : "#00CFA0", marginBottom:4 }}>
+                    {enc.encounter_type === "new" ? "New Patient" : "Follow Up"}{enc.status==="recording" && " • Recording"}{(proc||isGen) && " • Processing..."}{err && " • Error"}{enc.status==="finalized" && " • Finalized"}
                   </div>
-                  <div style={{ fontSize:14, color:"#ccc" }}>{hasNote ? (enc.original_note?.["Chief Concern"] || enc.original_note?.["Interval History"]?.substring(0,60)+"..." || "Note") : proc||isGen ? "Note is being generated..." : "Transcript saved"}</div>
+                  <div style={{ fontSize:14, color:"#ccc" }}>{hasNote ? (enc.original_note?.["Chief Concern"] || enc.original_note?.["Interval History"]?.substring(0,60)+"..." || "Note") : enc.status==="recording" ? "Recording in progress..." : proc||isGen ? "Transcribing and writing note..." : "Transcript saved"}</div>
                 </div>
                 <div style={{ fontSize:12, color:"#555", whiteSpace:"nowrap", marginLeft:12 }}>{fmt(enc.created_at)}</div>
               </div>
@@ -345,6 +345,7 @@ export default function Clinical() {
   const audioCtxRef = useRef(null); const chunksRef = useRef([]); const timerRef = useRef(null);
   const startTimeRef = useRef(0); const pausedTimeRef = useRef(0); const wakeLockRef = useRef(null);
   const saveIntervalRef = useRef(null); const isRecordingRef = useRef(false); const encounterTypeRef = useRef(null);
+  const uploadIntervalRef = useRef(null); const lastUploadedIndexRef = useRef(0); const sessionEncounterIdRef = useRef(null);
 
   useEffect(() => { try { const dg = localStorage.getItem("deepgram_api_key"); const an = localStorage.getItem("anthropic_api_key"); if (dg && an) { setDeepgramKey(dg); setAnthropicKey(an); setState(STATES.SELECT); } } catch(e){} }, []);
 
@@ -371,6 +372,27 @@ export default function Clinical() {
     } catch {}
   }, []);
 
+  // Upload new audio chunks to Supabase server
+  const uploadChunksToServer = useCallback(async () => {
+    const encId = sessionEncounterIdRef.current;
+    if (!encId || lastUploadedIndexRef.current >= chunksRef.current.length) return;
+    try {
+      const newChunks = chunksRef.current.slice(lastUploadedIndexRef.current);
+      const blob = new Blob(newChunks, { type: "audio/webm" });
+      const buffer = await blob.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      let binary = "";
+      for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+      const base64 = btoa(binary);
+      await supabaseRequest("/recording_chunks", "POST", {
+        encounter_id: encId,
+        chunk_index: lastUploadedIndexRef.current,
+        audio_data: base64,
+      });
+      lastUploadedIndexRef.current = chunksRef.current.length;
+    } catch {}
+  }, []);
+
   // Re-acquire wake lock (iOS releases it when screen dims)
   const acquireWakeLock = useCallback(async () => {
     try { if ('wakeLock' in navigator) wakeLockRef.current = await navigator.wakeLock.request('screen'); } catch {}
@@ -382,37 +404,53 @@ export default function Clinical() {
       if (!isRecordingRef.current) return;
       if (document.visibilityState === "hidden") {
         await saveChunksToIDB();
+        await uploadChunksToServer();
       } else {
         await acquireWakeLock();
         // Check if MediaRecorder died while hidden
         const mr = mediaRecorderRef.current;
         if (mr && mr.state === "inactive") {
-          // MediaRecorder was killed by OS — stop gracefully with what we have
-          stopTimer();
+          // MediaRecorder was killed by OS — flush chunks to server and process
+          stopTimer(); isRecordingRef.current = false;
+          clearInterval(saveIntervalRef.current); clearInterval(uploadIntervalRef.current);
           try { if (wakeLockRef.current) { await wakeLockRef.current.release(); wakeLockRef.current = null; } } catch {}
           if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
           if (audioCtxRef.current) try { audioCtxRef.current.close(); } catch {}
-          isRecordingRef.current = false;
-          clearInterval(saveIntervalRef.current);
-          setError("Recording was interrupted by the phone. Your audio has been saved — processing now.");
-          // Process what we have
-          const recovery = await idbLoadRecovery();
-          if (recovery) {
-            setRecovery(recovery);
+
+          // Try to flush remaining chunks and fire server processing
+          const encId = sessionEncounterIdRef.current;
+          if (encId) {
+            try { await uploadChunksToServer(); } catch {}
+            try { await updateEncounter(encId, { elapsed: Math.floor((Date.now() - startTimeRef.current) / 1000), status: "processing" }); } catch {}
+            fetch("/api/process-recording", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ encounter_id: encId, encounter_type: encounterTypeRef.current, anthropic_key: localStorage.getItem("anthropic_api_key") }),
+            }).catch(() => {});
+            await idbClear();
+            setNoteSent(true); setError(null);
             setState(STATES.SELECT);
           } else {
-            setState(STATES.IDLE);
+            // Fallback to IndexedDB recovery
+            const rec = await idbLoadRecovery();
+            if (rec) { setRecovery(rec); setState(STATES.SELECT); } else { setState(STATES.IDLE); }
+            setError("Recording was interrupted. Your audio has been saved.");
           }
         }
       }
     };
     document.addEventListener("visibilitychange", handler);
     return () => document.removeEventListener("visibilitychange", handler);
-  }, [saveChunksToIDB, acquireWakeLock, stopTimer]);
+  }, [saveChunksToIDB, uploadChunksToServer, acquireWakeLock, stopTimer]);
 
   const startRecording = useCallback(async () => {
     try {
       setError(null); setRecovery(null); await idbClear();
+
+      // Create encounter in DB immediately so we have an ID for chunk uploads
+      const savedEnc = await saveEncounter({ encounter_type: encounterType, status: "recording", elapsed: 0 });
+      if (savedEnc) { setEncounterId(savedEnc.id); sessionEncounterIdRef.current = savedEnc.id; }
+      lastUploadedIndexRef.current = 0;
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation:true, noiseSuppression:true, sampleRate:44100 } });
       streamRef.current = stream;
       const actx = new (window.AudioContext||window.webkitAudioContext)(); audioCtxRef.current = actx;
@@ -422,18 +460,20 @@ export default function Clinical() {
       mr.start(1000); pausedTimeRef.current = 0; isRecordingRef.current = true; encounterTypeRef.current = encounterType;
       setState(STATES.RECORDING); startTimer();
       await acquireWakeLock();
-      // Save chunks to IndexedDB every 30 seconds
+      // Save chunks to IndexedDB every 30 seconds (local backup)
       saveIntervalRef.current = setInterval(saveChunksToIDB, 30000);
+      // Upload chunks to server every 30 seconds (progressive upload)
+      uploadIntervalRef.current = setInterval(uploadChunksToServer, 30000);
     } catch(err) { chunksRef.current = []; pausedTimeRef.current = 0; setState(STATES.RECORDING); startTimer(); }
-  }, [startTimer, acquireWakeLock, saveChunksToIDB, encounterType]);
+  }, [startTimer, acquireWakeLock, saveChunksToIDB, uploadChunksToServer, encounterType]);
 
   const pauseRecording = useCallback(() => { if (mediaRecorderRef.current?.state==="recording") { mediaRecorderRef.current.pause(); pausedTimeRef.current=elapsed; stopTimer(); setState(STATES.PAUSED); } }, [elapsed, stopTimer]);
   const resumeRecording = useCallback(() => { if (mediaRecorderRef.current?.state==="paused") { mediaRecorderRef.current.resume(); startTimer(); setState(STATES.RECORDING); } }, [startTimer]);
 
   const stopRecording = useCallback(async () => {
-    stopTimer(); isRecordingRef.current = false; clearInterval(saveIntervalRef.current);
+    stopTimer(); isRecordingRef.current = false;
+    clearInterval(saveIntervalRef.current); clearInterval(uploadIntervalRef.current);
     try { if (wakeLockRef.current) { await wakeLockRef.current.release(); wakeLockRef.current=null; } } catch(e){}
-    const hasAudio = chunksRef.current.length > 0 && mediaRecorderRef.current;
     if (mediaRecorderRef.current?.state !== "inactive") try { mediaRecorderRef.current.stop(); } catch(e){}
     if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
     if (audioCtxRef.current) try { audioCtxRef.current.close(); } catch(e){}
@@ -442,35 +482,29 @@ export default function Clinical() {
       setState(STATES.PROCESSING); setTimeout(() => { setTrainingDone(true); setElapsed(0); setEncounterType(null); setState(STATES.SELECT); }, 1500); return;
     }
 
-    setState(STATES.PROCESSING); setProcessStage("transcribing");
+    setState(STATES.PROCESSING); setProcessStage("saving");
 
     try {
-      // 1. Transcribe
-      let transcript;
-      if (hasAudio && deepgramKey) {
-        const blob = new Blob(chunksRef.current, { type:"audio/webm" });
-        transcript = await transcribeAudio(blob, deepgramKey);
-      } else {
-        await new Promise(r => setTimeout(r, 500));
-        transcript = encounterType === "new" ? DEMO_NEW : DEMO_FU;
+      const encId = sessionEncounterIdRef.current;
+
+      // 1. Flush any remaining chunks to server
+      if (encId) {
+        await uploadChunksToServer();
+        // Update encounter with elapsed time
+        await updateEncounter(encId, { elapsed, status: "processing" });
       }
 
-      // 2. Save transcript — DATA IS SAFE
-      setProcessStage("saving");
-      const savedEnc = await saveEncounter({ encounter_type: encounterType, transcript, elapsed, status: "processing" });
-      if (savedEnc) setEncounterId(savedEnc.id);
-
-      // 3. Fire server request to generate note — FIRE AND FORGET
-      if (savedEnc) {
-        fetch("/api/generate-note", {
+      // 2. Fire server-side transcription + note generation — FIRE AND FORGET
+      if (encId) {
+        fetch("/api/process-recording", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ encounter_id: savedEnc.id, transcript, encounter_type: encounterType, anthropic_key: anthropicKey }),
+          body: JSON.stringify({ encounter_id: encId, encounter_type: encounterType, anthropic_key: anthropicKey }),
         }).catch(() => {});
         setNoteSent(true);
       }
 
-      // 4. Done — clear recovery data, show success
+      // 3. Done — phone is free, server handles the rest
       await idbClear();
       setProcessStage("done");
 
@@ -478,28 +512,45 @@ export default function Clinical() {
       setError(`Error: ${err.message}`);
       setState(STATES.IDLE);
     }
-  }, [stopTimer, encounterType, deepgramKey, anthropicKey, elapsed]);
+  }, [stopTimer, encounterType, anthropicKey, elapsed, uploadChunksToServer]);
 
   const recoverRecording = useCallback(async () => {
-    if (!recovery || !deepgramKey || !anthropicKey) return;
-    setState(STATES.PROCESSING); setProcessStage("transcribing"); setError(null);
+    if (!recovery || !anthropicKey) return;
+    setState(STATES.PROCESSING); setProcessStage("saving"); setError(null);
     try {
-      const blob = new Blob(recovery.chunks.map(b => new Blob([b], { type: "audio/webm" })), { type: "audio/webm" });
       const eType = recovery.meta.encounterType || "new";
       setEncounterType(eType); setElapsed(recovery.meta.elapsed || 0);
-      const transcript = await transcribeAudio(blob, deepgramKey);
-      setProcessStage("saving");
-      const savedEnc = await saveEncounter({ encounter_type: eType, transcript, elapsed: recovery.meta.elapsed || 0, status: "processing" });
-      if (savedEnc) { setEncounterId(savedEnc.id); fetch("/api/generate-note", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ encounter_id: savedEnc.id, transcript, encounter_type: eType, anthropic_key: anthropicKey }) }).catch(() => {}); setNoteSent(true); }
+
+      // Create encounter and upload recovered audio chunks to server
+      const savedEnc = await saveEncounter({ encounter_type: eType, status: "processing", elapsed: recovery.meta.elapsed || 0 });
+      if (savedEnc) {
+        // Convert recovered ArrayBuffers to base64 and upload as a single chunk
+        const blob = new Blob(recovery.chunks.map(b => new Blob([b], { type: "audio/webm" })), { type: "audio/webm" });
+        const buffer = await blob.arrayBuffer();
+        const bytes = new Uint8Array(buffer);
+        let binary = "";
+        for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+        const base64 = btoa(binary);
+        await supabaseRequest("/recording_chunks", "POST", { encounter_id: savedEnc.id, chunk_index: 0, audio_data: base64 });
+
+        // Fire server processing
+        setEncounterId(savedEnc.id);
+        fetch("/api/process-recording", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ encounter_id: savedEnc.id, encounter_type: eType, anthropic_key: anthropicKey }),
+        }).catch(() => {});
+        setNoteSent(true);
+      }
       await idbClear(); setRecovery(null); setProcessStage("done");
     } catch (err) { setError(`Recovery error: ${err.message}`); setState(STATES.SELECT); }
-  }, [recovery, deepgramKey, anthropicKey]);
+  }, [recovery, anthropicKey]);
 
   const dismissRecovery = useCallback(async () => { await idbClear(); setRecovery(null); }, []);
 
   const reset = useCallback(() => {
     setElapsed(0); pausedTimeRef.current=0; chunksRef.current=[]; analyserRef.current=null;
-    setEncounterType(null); setNoteData(null); setEncounterId(null); setError(null); setProcessStage("transcribing"); setNoteSent(false);
+    setEncounterType(null); setNoteData(null); setEncounterId(null); setError(null); setProcessStage("saving"); setNoteSent(false);
+    sessionEncounterIdRef.current = null; lastUploadedIndexRef.current = 0;
     setState(STATES.SELECT);
   }, []);
 

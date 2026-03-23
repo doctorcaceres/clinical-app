@@ -3,6 +3,9 @@
   "functions": {
     "api/generate-note.js": {
       "maxDuration": 300
+    },
+    "api/process-recording.js": {
+      "maxDuration": 300
     }
   },
   "rewrites": [
