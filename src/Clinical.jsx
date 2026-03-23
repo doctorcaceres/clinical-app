@@ -376,21 +376,31 @@ export default function Clinical() {
   const uploadChunksToServer = useCallback(async () => {
     const encId = sessionEncounterIdRef.current;
     if (!encId || lastUploadedIndexRef.current >= chunksRef.current.length) return;
-    try {
-      const newChunks = chunksRef.current.slice(lastUploadedIndexRef.current);
-      const blob = new Blob(newChunks, { type: "audio/webm" });
-      const buffer = await blob.arrayBuffer();
-      const bytes = new Uint8Array(buffer);
-      let binary = "";
-      for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-      const base64 = btoa(binary);
-      await supabaseRequest("/recording_chunks", "POST", {
-        encounter_id: encId,
-        chunk_index: lastUploadedIndexRef.current,
-        audio_data: base64,
-      });
-      lastUploadedIndexRef.current = chunksRef.current.length;
-    } catch {}
+    const newChunks = chunksRef.current.slice(lastUploadedIndexRef.current);
+    const blob = new Blob(newChunks, { type: "audio/webm" });
+    const buffer = await blob.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    const chunkSize = 8192;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+    }
+    const base64 = btoa(binary);
+    // Retry up to 3 times on failure
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await supabaseRequest("/recording_chunks", "POST", {
+          encounter_id: encId,
+          chunk_index: lastUploadedIndexRef.current,
+          audio_data: base64,
+        });
+        lastUploadedIndexRef.current = chunksRef.current.length;
+        return; // success
+      } catch (err) {
+        console.error(`Chunk upload attempt ${attempt + 1} failed:`, err.message);
+        if (attempt < 2) await new Promise(r => setTimeout(r, 2000));
+      }
+    }
   }, []);
 
   // Re-acquire wake lock (iOS releases it when screen dims)
@@ -494,14 +504,41 @@ export default function Clinical() {
         await updateEncounter(encId, { elapsed, status: "processing" });
       }
 
-      // 2. Fire server-side transcription + note generation — FIRE AND FORGET
+      // 2. Verify chunks actually exist on server before triggering processing
       if (encId) {
-        fetch("/api/process-recording", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ encounter_id: encId, encounter_type: encounterType, anthropic_key: anthropicKey }),
-        }).catch(() => {});
-        setNoteSent(true);
+        let chunksExist = false;
+        try {
+          const checkRes = await supabaseRequest(`/recording_chunks?encounter_id=eq.${encId}&select=id&limit=1`);
+          chunksExist = checkRes && checkRes.length > 0;
+        } catch {}
+
+        if (chunksExist) {
+          // Server-side transcription + note generation — FIRE AND FORGET
+          fetch("/api/process-recording", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ encounter_id: encId, encounter_type: encounterType, anthropic_key: anthropicKey }),
+          }).catch(() => {});
+          setNoteSent(true);
+        } else {
+          // Fallback: chunks failed to upload, do client-side transcription
+          console.warn("No chunks on server, falling back to client-side transcription");
+          setProcessStage("transcribing");
+          const audioBlob = new Blob(chunksRef.current, { type: "audio/webm" });
+          const dgKey = localStorage.getItem("deepgram_api_key");
+          if (audioBlob.size > 0 && dgKey) {
+            const transcript = await transcribeAudio(audioBlob, dgKey);
+            await updateEncounter(encId, { transcript, status: "processing" });
+            fetch("/api/generate-note", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ encounter_id: encId, transcript, encounter_type: encounterType, anthropic_key: anthropicKey }),
+            }).catch(() => {});
+            setNoteSent(true);
+          } else {
+            throw new Error("No audio recorded");
+          }
+        }
       }
 
       // 3. Done — phone is free, server handles the rest
