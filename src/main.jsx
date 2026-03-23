@@ -7,3 +7,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
     <Clinical />
   </React.StrictMode>,
 )
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js');
+}
