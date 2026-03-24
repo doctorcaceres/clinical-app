@@ -40,6 +40,8 @@ PLAN:
 - End with follow-up timing.
 - Then: "Electronic Signature:\\nJ. Alfredo Caceres, MD\\nPediatric Neurology"
 
+FORMATTING: Use perfect grammar throughout the entire note. Pay close attention to verb tenses — use past tense for events that already happened and present tense for current status. Ensure subject-verb agreement, proper use of articles, and correct punctuation. Proofread the entire note before returning it. Grammatical errors are unacceptable in a medical document.
+
 Return ONLY a valid JSON object. No markdown, no backticks.`;
 
 const NEW_SECTIONS = `Return JSON with keys in this order: "Chief Concern", "History of Present Illness", "Review of Systems", "Past Medical History", "Family History", "Birth History", "Developmental History", "Social History", "Assessment", "Plan"`;
