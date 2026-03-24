@@ -40,38 +40,40 @@ Return ONLY a valid JSON object. No markdown, no backticks.`;
 const NEW_SECTIONS = `Return JSON with keys in this order: "Chief Concern", "History of Present Illness", "Review of Systems", "Past Medical History", "Family History", "Birth History", "Developmental History", "Social History", "Assessment", "Plan"`;
 const FU_SECTIONS = `Return JSON with keys in this order: "Date of Last Visit", "Summary from Last Visit", "Interval History", "Assessment", "Plan"`;
 
+async function supabaseFetch(path, method = "GET", body = null) {
+  const options = { method, headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json" } };
+  if (body) options.body = JSON.stringify(body);
+  return fetch(`${SUPABASE_URL}/rest/v1${path}`, options);
+}
+
 export default async function handler(req, res) {
-  // Only allow POST
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "POST only" });
-  }
+  if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
 
   let body = req.body;
-  // Parse body if it's a string
   if (typeof body === "string") {
-    try { body = JSON.parse(body); } catch (e) { return res.status(400).json({ error: "Invalid JSON" }); }
+    try { body = JSON.parse(body); } catch { return res.status(400).json({ error: "Invalid JSON" }); }
   }
 
-  const { encounter_id, transcript, encounter_type, anthropic_key } = body || {};
-
-  if (!encounter_id || !transcript || !encounter_type || !anthropic_key) {
-    return res.status(400).json({ error: "Missing fields", received: { encounter_id: !!encounter_id, transcript: !!transcript, encounter_type: !!encounter_type, anthropic_key: !!anthropic_key } });
+  const { encounter_id, encounter_type, anthropic_key } = body || {};
+  if (!encounter_id || !encounter_type || !anthropic_key) {
+    return res.status(400).json({ error: "Missing fields" });
   }
 
   try {
-    // Update status to processing
-    await fetch(`${SUPABASE_URL}/rest/v1/encounters?id=eq.${encounter_id}`, {
-      method: "PATCH",
-      headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "processing" }),
-    });
+    // 1. Update status
+    await supabaseFetch(`/encounters?id=eq.${encounter_id}`, "PATCH", { status: "processing" });
 
-    // Get learning corrections
+    // 2. Fetch transcript from DB
+    const encRes = await supabaseFetch(`/encounters?id=eq.${encounter_id}&select=transcript`);
+    if (!encRes.ok) throw new Error("Failed to fetch encounter");
+    const encData = await encRes.json();
+    const transcript = encData?.[0]?.transcript;
+    if (!transcript) throw new Error("No transcript found for this encounter");
+
+    // 3. Get learning corrections
     let learningContext = "";
     try {
-      const lcRes = await fetch(`${SUPABASE_URL}/rest/v1/encounters?final_note=not.is.null&order=created_at.desc&limit=10`, {
-        headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` },
-      });
+      const lcRes = await supabaseFetch("/encounters?final_note=not.is.null&order=created_at.desc&limit=10");
       if (lcRes.ok) {
         const pastEnc = await lcRes.json();
         const corrections = pastEnc
@@ -87,28 +89,18 @@ export default async function handler(req, res) {
             return diffs.join("\n");
           })
           .filter(d => d.length > 0);
-        if (corrections.length > 0) {
-          learningContext = `\n\nLEARN FROM PAST CORRECTIONS:\n${corrections.join("\n---\n")}`;
-        }
+        if (corrections.length > 0) learningContext = `\n\nLEARN FROM PAST CORRECTIONS:\n${corrections.join("\n---\n")}`;
       }
-    } catch (e) {}
+    } catch {}
 
-    // Truncate long transcripts
+    // 4. Generate note with Claude
     let processedTranscript = transcript;
-    if (transcript.length > 50000) {
-      processedTranscript = transcript.substring(0, 50000) + "\n\n[Truncated]";
-    }
+    if (transcript.length > 50000) processedTranscript = transcript.substring(0, 50000) + "\n\n[Truncated]";
 
     const sections = encounter_type === "new" ? NEW_SECTIONS : FU_SECTIONS;
-
-    // Call Claude
     const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": anthropic_key,
-        "anthropic-version": "2023-06-01",
-      },
+      headers: { "Content-Type": "application/json", "x-api-key": anthropic_key, "anthropic-version": "2023-06-01" },
       body: JSON.stringify({
         model: "claude-sonnet-4-20250514",
         max_tokens: 8000,
@@ -118,35 +110,29 @@ export default async function handler(req, res) {
     });
 
     if (!claudeRes.ok) {
-      const errText = await claudeRes.text().catch(() => "unknown");
+      const errText = await claudeRes.text().catch(() => "");
       throw new Error(`Claude ${claudeRes.status}: ${errText.substring(0, 200)}`);
     }
 
     const claudeData = await claudeRes.json();
     const text = claudeData.content.filter(i => i.type === "text").map(i => i.text).join("");
-    const cleaned = text.replace(/```json|```/g, "").trim();
-    const note = JSON.parse(cleaned);
+    const note = JSON.parse(text.replace(/```json|```/g, "").trim());
 
-    // Save to Supabase
-    const saveRes = await fetch(`${SUPABASE_URL}/rest/v1/encounters?id=eq.${encounter_id}`, {
-      method: "PATCH",
-      headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ original_note: note, status: "review", updated_at: new Date().toISOString() }),
+    // 5. Save note
+    await supabaseFetch(`/encounters?id=eq.${encounter_id}`, "PATCH", {
+      original_note: note, status: "review", updated_at: new Date().toISOString(),
     });
 
-    if (!saveRes.ok) throw new Error("Failed to save note to database");
-
+    console.log(`Note generated for encounter ${encounter_id}`);
     return res.status(200).json({ success: true });
+
   } catch (err) {
     console.error("generate-note error:", err.message);
-    // Mark as error
     try {
-      await fetch(`${SUPABASE_URL}/rest/v1/encounters?id=eq.${encounter_id}`, {
-        method: "PATCH",
-        headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ status: "error", updated_at: new Date().toISOString() }),
+      await supabaseFetch(`/encounters?id=eq.${encounter_id}`, "PATCH", {
+        status: "error", updated_at: new Date().toISOString(),
       });
-    } catch (e) {}
+    } catch {}
     return res.status(500).json({ error: err.message });
   }
 }
