@@ -68,8 +68,8 @@ export default async function handler(req, res) {
     // 1. Update status
     await supabaseFetch(`/encounters?id=eq.${encounter_id}`, "PATCH", { status: "processing" });
 
-    // 2. Wait for any in-flight chunk uploads to complete (client fires them non-blocking)
-    await new Promise(r => setTimeout(r, 5000));
+    // 2. Brief wait for any in-flight chunk uploads to settle
+    await new Promise(r => setTimeout(r, 3000));
 
     // 3. Fetch all audio chunks for this encounter
     const chunksRes = await supabaseFetch(`/recording_chunks?encounter_id=eq.${encounter_id}&order=chunk_index.asc`);

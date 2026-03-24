@@ -490,10 +490,10 @@ export default function Clinical() {
       mr.start(1000); pausedTimeRef.current = 0; isRecordingRef.current = true; encounterTypeRef.current = encounterType;
       setState(STATES.RECORDING); startTimer();
       await acquireWakeLock();
-      // Save chunks to IndexedDB every 30 seconds (local backup)
-      saveIntervalRef.current = setInterval(saveChunksToIDB, 30000);
-      // Upload chunks to server every 30 seconds (progressive upload)
-      uploadIntervalRef.current = setInterval(uploadChunksToServer, 30000);
+      // Save chunks to IndexedDB every 15 seconds (local backup)
+      saveIntervalRef.current = setInterval(saveChunksToIDB, 15000);
+      // Upload chunks to server every 15 seconds (progressive upload)
+      uploadIntervalRef.current = setInterval(uploadChunksToServer, 15000);
     } catch(err) { chunksRef.current = []; pausedTimeRef.current = 0; setState(STATES.RECORDING); startTimer(); }
   }, [startTimer, acquireWakeLock, saveChunksToIDB, uploadChunksToServer, encounterType]);
 
@@ -504,8 +504,15 @@ export default function Clinical() {
     stopTimer(); isRecordingRef.current = false;
     clearInterval(saveIntervalRef.current); clearInterval(uploadIntervalRef.current);
     try { if (wakeLockRef.current) { await wakeLockRef.current.release(); wakeLockRef.current=null; } } catch(e){}
-    if (mediaRecorderRef.current?.state !== "inactive") try { mediaRecorderRef.current.stop(); } catch(e){}
-    if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+
+    // Step 1: Stop MediaRecorder and WAIT for final data chunk
+    const mr = mediaRecorderRef.current;
+    if (mr && mr.state !== "inactive") {
+      await new Promise(resolve => { mr.onstop = resolve; try { mr.stop(); } catch { resolve(); } });
+    }
+
+    // Step 2: NOW kill the microphone (yellow light goes off)
+    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
     if (audioCtxRef.current) try { audioCtxRef.current.close(); } catch(e){}
 
     if (encounterType === "training") {
@@ -513,20 +520,17 @@ export default function Clinical() {
     }
 
     const encId = sessionEncounterIdRef.current;
-    if (!encId || encounterType === "training") return;
+    if (!encId) return;
 
     setState(STATES.PROCESSING); setProcessStage("saving");
 
-    // ALL non-blocking: fire everything and show Done IMMEDIATELY
-    // The server will wait a few seconds for the final chunk to arrive
+    // Step 3: Upload final chunk — await it (only last ~15s of audio, very small/fast)
+    try { await uploadChunksToServer(); } catch {}
 
-    // 1. Upload final chunk — best effort, don't await
-    uploadChunksToServer().catch(() => {});
+    // Step 4: Update encounter status
+    try { await updateEncounter(encId, { elapsed, status: "processing" }); } catch {}
 
-    // 2. Update encounter status — best effort, don't await
-    updateEncounter(encId, { elapsed, status: "processing" }).catch(() => {});
-
-    // 3. Tell server to process — keepalive ensures request completes even if app closes
+    // Step 5: Tell server to process — keepalive ensures request completes even if app closes
     try {
       fetch("/api/process-recording", {
         method: "POST",
@@ -536,7 +540,7 @@ export default function Clinical() {
       });
     } catch {}
 
-    // 4. Done — phone is free NOW. Server handles the rest.
+    // Step 6: Done — phone is free. Server handles transcription + note.
     setNoteSent(true);
     idbClear().catch(() => {});
     setProcessStage("done");
