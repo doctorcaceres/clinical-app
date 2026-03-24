@@ -16,7 +16,7 @@ TRANSCRIPT FORMAT:
 - Fix speech recognition errors using medical knowledge.
 
 CHIEF CONCERN: One line.
-HPI: Start with "[Age] [sex] with [history], here in my clinic for [reason]. [Who is here] who provides the history." Tell story chronologically.
+HPI: Start with "[Age] [sex] with [history], here in my clinic for [reason]. [Who is here] who provides the history." Tell story chronologically. School information (grade, school name, academic performance, IEP, special services, cognitive testing) should always be included as a paragraph within the HPI. Never put school information under Developmental History or Social History. It belongs in the HPI narrative.
 ROS: Brief or itemized.
 PMH: Brief.
 FAMILY HISTORY: Narrative style.
