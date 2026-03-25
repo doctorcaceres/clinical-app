@@ -108,16 +108,21 @@ export default async function handler(req, res) {
     if (transcript.length > 50000) processedTranscript = transcript.substring(0, 50000) + "\n\n[Truncated]";
 
     const sections = encounter_type === "new" ? NEW_SECTIONS : FU_SECTIONS;
-    const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": anthropic_key, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 8000,
-        system: STYLE_PROMPT + learningContext,
-        messages: [{ role: "user", content: `Transcript of a ${encounter_type === "new" ? "new patient" : "follow-up"} encounter:\n\n${processedTranscript}${doctorInstructions ? `\n\nDOCTOR'S ADDITIONAL INSTRUCTIONS (not part of the encounter — these are directives from the doctor about what to include in the note):\n${doctorInstructions}` : ""}\n\n${sections}\n\nReturn ONLY the JSON object.` }],
-      }),
+    const claudeBody = JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 8000,
+      system: STYLE_PROMPT + learningContext,
+      messages: [{ role: "user", content: `Transcript of a ${encounter_type === "new" ? "new patient" : "follow-up"} encounter:\n\n${processedTranscript}${doctorInstructions ? `\n\nDOCTOR'S ADDITIONAL INSTRUCTIONS (not part of the encounter — these are directives from the doctor about what to include in the note):\n${doctorInstructions}` : ""}\n\n${sections}\n\nReturn ONLY the JSON object.` }],
     });
+    const claudeHeaders = { "Content-Type": "application/json", "x-api-key": anthropic_key, "anthropic-version": "2023-06-01" };
+
+    let claudeRes;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      claudeRes = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: claudeHeaders, body: claudeBody });
+      if (claudeRes.ok || (claudeRes.status !== 429 && claudeRes.status !== 529)) break;
+      console.log(`Claude ${claudeRes.status}, retrying in ${(attempt + 1) * 10}s (attempt ${attempt + 1}/4)`);
+      await new Promise(r => setTimeout(r, (attempt + 1) * 10000));
+    }
 
     if (!claudeRes.ok) {
       const errText = await claudeRes.text().catch(() => "");
