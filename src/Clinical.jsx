@@ -347,11 +347,13 @@ function RecentNotes({ onBack, onOpenNote, anthropicKey }) {
     if (!enc.transcript) { alert("No transcript available for this encounter."); return; }
     setGenerating(enc.id);
     try {
-      await updateEncounter(enc.id, { status: "processing" });
-      const note = await generateNoteLocally(enc.encounter_type, enc.transcript, anthropicKey);
-      await updateEncounter(enc.id, { original_note: note, status: "review", updated_at: new Date().toISOString() });
+      const res = await fetch("/api/generate-note", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ encounter_id: enc.id, encounter_type: enc.encounter_type, anthropic_key: anthropicKey }),
+      });
+      if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.error || `Server error ${res.status}`); }
     } catch(e) {
-      alert("Failed: " + e.message);
+      alert("Retry failed: " + e.message);
       try { await updateEncounter(enc.id, { status: "error" }); } catch {}
     }
     setGenerating(null); load();
