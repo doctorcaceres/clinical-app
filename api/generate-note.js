@@ -40,6 +40,8 @@ PLAN:
 - End with follow-up timing.
 - Then: "Electronic Signature:\\nJ. Alfredo Caceres, MD\\nPediatric Neurology"
 
+DOCTOR'S ADDITIONAL INSTRUCTIONS: When provided, these are directives from the doctor recorded AFTER the encounter. They describe things that should appear in the note but were not necessarily said out loud during the visit. Follow these instructions carefully and weave the requested content naturally into the appropriate sections of the note.
+
 FORMATTING: Use perfect grammar throughout the entire note. Pay close attention to verb tenses — use past tense for events that already happened and present tense for current status. Ensure subject-verb agreement, proper use of articles, and correct punctuation. Proofread the entire note before returning it. Grammatical errors are unacceptable in a medical document.
 
 Return ONLY a valid JSON object. No markdown, no backticks.`;
@@ -71,10 +73,11 @@ export default async function handler(req, res) {
     await supabaseFetch(`/encounters?id=eq.${encounter_id}`, "PATCH", { status: "processing" });
 
     // 2. Fetch transcript from DB
-    const encRes = await supabaseFetch(`/encounters?id=eq.${encounter_id}&select=transcript`);
+    const encRes = await supabaseFetch(`/encounters?id=eq.${encounter_id}&select=transcript,doctor_instructions`);
     if (!encRes.ok) throw new Error("Failed to fetch encounter");
     const encData = await encRes.json();
     const transcript = encData?.[0]?.transcript;
+    const doctorInstructions = encData?.[0]?.doctor_instructions;
     if (!transcript) throw new Error("No transcript found for this encounter");
 
     // 3. Get learning corrections
@@ -112,7 +115,7 @@ export default async function handler(req, res) {
         model: "claude-sonnet-4-20250514",
         max_tokens: 8000,
         system: STYLE_PROMPT + learningContext,
-        messages: [{ role: "user", content: `Transcript of a ${encounter_type === "new" ? "new patient" : "follow-up"} encounter:\n\n${processedTranscript}\n\n${sections}\n\nReturn ONLY the JSON object.` }],
+        messages: [{ role: "user", content: `Transcript of a ${encounter_type === "new" ? "new patient" : "follow-up"} encounter:\n\n${processedTranscript}${doctorInstructions ? `\n\nDOCTOR'S ADDITIONAL INSTRUCTIONS (not part of the encounter — these are directives from the doctor about what to include in the note):\n${doctorInstructions}` : ""}\n\n${sections}\n\nReturn ONLY the JSON object.` }],
       }),
     });
 

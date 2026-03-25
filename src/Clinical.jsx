@@ -21,7 +21,7 @@ async function getRecentEncounters() { return await supabaseRequest("/encounters
 async function deleteEncounter(id) { await supabaseRequest(`/encounters?id=eq.${id}`, "DELETE"); }
 async function getLearningData() { const e = await supabaseRequest("/encounters?final_note=not.is.null&order=created_at.desc&limit=10"); return e || []; }
 
-const STATES = { SETUP: "setup", SELECT: "select", IDLE: "idle", RECORDING: "recording", PAUSED: "paused", PROCESSING: "processing", NOTE: "note", NOTES: "notes" };
+const STATES = { SETUP: "setup", SELECT: "select", IDLE: "idle", RECORDING: "recording", PAUSED: "paused", INSTRUCTIONS: "instructions", PROCESSING: "processing", NOTE: "note", NOTES: "notes" };
 
 // ============================================================
 // Deepgram — client-side transcription
@@ -72,6 +72,8 @@ ASSESSMENT:
 
 PLAN: Dash-style "- " bullets. Specific labs, meds, imaging. End with follow-up timing.
 After plan: "Electronic Signature:\\nJ. Alfredo Caceres, MD\\nPediatric Neurology"
+
+DOCTOR'S ADDITIONAL INSTRUCTIONS: When provided, these are directives from the doctor recorded AFTER the encounter. They describe things that should appear in the note but were not necessarily said out loud during the visit. Follow these instructions carefully and weave the requested content naturally into the appropriate sections of the note.
 
 FORMATTING: Use perfect grammar throughout the entire note. Pay close attention to verb tenses — use past tense for events that already happened and present tense for current status. Ensure subject-verb agreement, proper use of articles, and correct punctuation. Proofread the entire note before returning it. Grammatical errors are unacceptable in a medical document.
 
@@ -125,6 +127,109 @@ function Waveform({ analyser, isActive }) {
     }; draw(); return () => cancelAnimationFrame(animRef.current);
   }, [analyser, isActive]);
   return <canvas ref={canvasRef} style={{ width: "100%", height: "80px", display: "block" }} />;
+}
+
+function InstructionsScreen({ onSubmit, onSkip, deepgramKey }) {
+  const [recording, setRecording] = useState(false);
+  const [done, setDone] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const [instructionText, setInstructionText] = useState("");
+  const mrRef = useRef(null);
+  const streamRef = useRef(null);
+  const chunksRef = useRef([]);
+
+  const startRec = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const mr = new MediaRecorder(stream, { mimeType: "audio/webm" });
+      mrRef.current = mr;
+      chunksRef.current = [];
+      mr.ondataavailable = (e) => { if (e.data.size > 0) chunksRef.current.push(e.data); };
+      mr.start(1000);
+      setRecording(true);
+    } catch (e) { alert("Microphone error: " + e.message); }
+  };
+
+  const stopRec = async () => {
+    const mr = mrRef.current;
+    if (mr && mr.state !== "inactive") {
+      await new Promise(resolve => { mr.onstop = resolve; try { mr.stop(); } catch { resolve(); } });
+    }
+    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
+    setRecording(false);
+    setTranscribing(true);
+    try {
+      const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+      const text = await transcribeAudio(blob, deepgramKey);
+      setInstructionText(text);
+      setDone(true);
+    } catch (e) {
+      alert("Could not transcribe instructions: " + e.message);
+      setDone(true);
+      setInstructionText("");
+    }
+    setTranscribing(false);
+  };
+
+  const bs = { padding: "16px 32px", borderRadius: 12, border: "none", fontSize: 15, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", width: "100%", maxWidth: 300 };
+
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 24, animation: "fadeIn 0.5s ease", padding: "0 24px" }}>
+      <div style={{ fontSize: 13, fontWeight: 500, letterSpacing: "0.12em", textTransform: "uppercase", color: "#00CFA0" }}>Recording Complete</div>
+      <div style={{ fontSize: 18, fontWeight: 500, color: "#FAFAFA", textAlign: "center", lineHeight: 1.5 }}>
+        Add instructions for the note?
+      </div>
+      <div style={{ fontSize: 13, color: "#666", textAlign: "center", maxWidth: 300, lineHeight: 1.5 }}>
+        Dictate anything the note should include that wasn't said during the visit.
+      </div>
+
+      {!recording && !done && !transcribing && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12, width: "100%", maxWidth: 300 }}>
+          <button onClick={startRec} style={{ ...bs, backgroundColor: "#00CFA0", color: "#0A0A0A" }}>
+            🎙 Add Instructions
+          </button>
+          <button onClick={onSkip} style={{ ...bs, backgroundColor: "transparent", border: "2px solid #333", color: "#888" }}>
+            Skip
+          </button>
+        </div>
+      )}
+
+      {recording && (
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 16 }}>
+          <div style={{ width: 16, height: 16, borderRadius: "50%", backgroundColor: "#FF4757", animation: "breathe 1.5s ease-in-out infinite" }} />
+          <div style={{ fontSize: 14, color: "#FF4757", letterSpacing: "0.05em" }}>Recording instructions...</div>
+          <button onClick={stopRec} style={{ ...bs, backgroundColor: "#FF4757", color: "#FAFAFA", maxWidth: 200 }}>
+            Done
+          </button>
+        </div>
+      )}
+
+      {transcribing && (
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
+          <div style={{ width: 36, height: 36, borderRadius: "50%", border: "3px solid #1a1a1a", borderTopColor: "#00CFA0", animation: "spin 1s linear infinite" }} />
+          <div style={{ fontSize: 14, color: "#888" }}>Transcribing your instructions...</div>
+        </div>
+      )}
+
+      {done && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12, width: "100%", maxWidth: 300 }}>
+          {instructionText && (
+            <div style={{ backgroundColor: "#111", border: "1px solid #333", borderRadius: 12, padding: 16, maxHeight: 150, overflowY: "auto" }}>
+              <div style={{ fontSize: 11, color: "#00CFA0", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8 }}>Your instructions</div>
+              <div style={{ fontSize: 14, color: "#ccc", lineHeight: 1.5 }}>{instructionText}</div>
+            </div>
+          )}
+          <button onClick={() => onSubmit(instructionText)} style={{ ...bs, backgroundColor: "#00CFA0", color: "#0A0A0A" }}>
+            Send to Note Generation
+          </button>
+          <button onClick={() => { setDone(false); setInstructionText(""); }} style={{ ...bs, backgroundColor: "transparent", border: "2px solid #333", color: "#888" }}>
+            Re-record
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function PulseRing({ active }) { return <div style={{ position:"absolute", inset:-12, borderRadius:"50%", border:"2px solid rgba(0,207,160,0.4)", animation: active ? "pulseRing 2s ease-out infinite" : "none", opacity: active?1:0, transition:"opacity 0.5s ease", pointerEvents:"none" }} />; }
@@ -312,6 +417,7 @@ export default function Clinical() {
   const [anthropicKey, setAnthropicKey] = useState(null);
   const [processStage, setProcessStage] = useState("transcribing");
   const [noteSent, setNoteSent] = useState(false);
+  const [audioBlobForProcessing, setAudioBlobForProcessing] = useState(null);
 
   const mediaRecorderRef = useRef(null); const streamRef = useRef(null); const analyserRef = useRef(null);
   const audioCtxRef = useRef(null); const chunksRef = useRef([]); const timerRef = useRef(null);
@@ -379,21 +485,25 @@ export default function Clinical() {
     // 5. Build audio blob
     if (chunksRef.current.length === 0) { setError("No audio recorded."); setState(STATES.IDLE); return; }
     const audioBlob = new Blob(chunksRef.current, { type: "audio/webm" });
+    setAudioBlobForProcessing(audioBlob);
 
-    // 6. Transcribe with Deepgram (client-side)
+    // 6. Go to instructions screen
+    setState(STATES.INSTRUCTIONS);
+  }, [stopTimer, encounterType]);
+
+  const processEncounter = useCallback(async (doctorInstructions = "") => {
     setState(STATES.PROCESSING); setProcessStage("transcribing");
     try {
-      const transcript = await transcribeAudio(audioBlob, deepgramKey);
+      const transcript = await transcribeAudio(audioBlobForProcessing, deepgramKey);
 
-      // 7. Save encounter with transcript
       setProcessStage("generating");
       const savedEnc = await saveEncounter({
         encounter_type: encounterType, transcript, elapsed, status: "processing",
+        doctor_instructions: doctorInstructions || null,
       });
 
       if (savedEnc) {
         setEncounterId(savedEnc.id);
-        // 8. Fire note generation to server — fire and forget
         fetch("/api/generate-note", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -408,7 +518,7 @@ export default function Clinical() {
       setError("Transcription failed: " + err.message);
       setState(STATES.IDLE);
     }
-  }, [stopTimer, encounterType, deepgramKey, anthropicKey, elapsed]);
+  }, [audioBlobForProcessing, deepgramKey, encounterType, anthropicKey, elapsed]);
 
   const reset = useCallback(() => {
     setElapsed(0); pausedTimeRef.current=0; chunksRef.current=[]; analyserRef.current=null;
@@ -420,7 +530,7 @@ export default function Clinical() {
   if (state === STATES.NOTE && noteData) return <NoteReview encounterType={encounterType} elapsed={elapsed} noteData={noteData} encounterId={encounterId} onNewEncounter={reset} />;
   if (state === STATES.NOTES) return <RecentNotes onBack={() => setState(STATES.SELECT)} anthropicKey={anthropicKey} onOpenNote={(enc) => { setEncounterType(enc.encounter_type); setElapsed(enc.elapsed||0); setNoteData(enc.final_note||enc.original_note); setEncounterId(enc.id); setState(STATES.NOTE); }} />;
 
-  const isRec = state === STATES.RECORDING, isPau = state === STATES.PAUSED, isIdl = state === STATES.IDLE, isSel = state === STATES.SELECT, isProc = state === STATES.PROCESSING;
+  const isRec = state === STATES.RECORDING, isPau = state === STATES.PAUSED, isIdl = state === STATES.IDLE, isSel = state === STATES.SELECT, isProc = state === STATES.PROCESSING, isInstr = state === STATES.INSTRUCTIONS;
 
   return (
     <div style={{ minHeight:"100vh", backgroundColor:"#0A0A0A", color:"#FAFAFA", fontFamily:"'SF Pro Display',-apple-system,BlinkMacSystemFont,sans-serif", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"space-between", padding:"0 24px", userSelect:"none", WebkitUserSelect:"none", WebkitTapHighlightColor:"transparent", overflow:"hidden", position:"relative" }}>
@@ -460,9 +570,10 @@ export default function Clinical() {
           </div>
         )}
 
+        {isInstr && <InstructionsScreen deepgramKey={deepgramKey} onSubmit={(text) => processEncounter(text)} onSkip={() => processEncounter("")} />}
         {isProc && <ProcessingScreen stage={processStage} onDone={reset} />}
 
-        {!isSel && !isProc && (
+        {!isSel && !isProc && !isInstr && (
           <>
             <div style={{ fontSize:13, fontWeight:500, letterSpacing:"0.12em", textTransform:"uppercase", color: encounterType==="training" ? "#FF9F43" : "#00CFA0", backgroundColor: encounterType==="training" ? "rgba(255,159,67,0.08)" : "rgba(0,207,160,0.08)", padding:"6px 16px", borderRadius:20, animation:"fadeIn 0.5s ease" }}>
               {encounterType === "new" ? "New Patient" : encounterType === "followup" ? "Follow Up" : "Training Mode"}
