@@ -87,10 +87,10 @@ async function generateNoteLocally(encounterType, transcript, anthropicKey) {
   let learningContext = "";
   try {
     const past = await getLearningData();
-    const corrections = past.filter(e => e.original_note && e.final_note && JSON.stringify(e.original_note) !== JSON.stringify(e.final_note)).slice(0, 3).map(e => {
-      const d = []; for (const k of Object.keys(e.original_note)) { if (e.final_note[k] && e.original_note[k] !== e.final_note[k]) d.push(`"${k}": changed from "${e.original_note[k].substring(0,150)}..." to "${e.final_note[k].substring(0,150)}..."`); } return d.join("\n");
+    const corrections = past.filter(e => e.original_note && e.final_note && JSON.stringify(e.original_note) !== JSON.stringify(e.final_note)).slice(0, 5).map(e => {
+      const d = []; for (const k of Object.keys(e.original_note)) { if (e.final_note[k] && e.original_note[k] !== e.final_note[k]) d.push(`Section "${k}":\nAI WROTE: "${e.original_note[k]}"\nDOCTOR CHANGED TO: "${e.final_note[k]}"`); } return d.join("\n\n");
     }).filter(d => d.length > 0);
-    if (corrections.length > 0) learningContext = `\n\nLEARN FROM PAST CORRECTIONS:\n${corrections.join("\n---\n")}`;
+    if (corrections.length > 0) learningContext = `\n\nLEARN FROM PAST CORRECTIONS — study these carefully. The doctor edited these sections. Understand WHY the doctor made each change and apply the same patterns to this new note. Do NOT repeat the mistakes shown below:\n${corrections.join("\n---\n")}`;
   } catch (e) {}
 
   let t = transcript; if (t.length > 50000) t = t.substring(0, 50000) + "\n\n[Truncated]";
