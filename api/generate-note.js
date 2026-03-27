@@ -36,6 +36,10 @@ ASSESSMENT:
 - Keep length proportional to case complexity.
 - The Assessment should primarily be captured from the doctor's own clinical reasoning shared out loud with the family during the encounter. The doctor discusses differentials, explains their thinking, and shares their impression with parents as part of the conversation. Listen for this reasoning and use it as the foundation of the Assessment. Do not generate generic assessments — capture what the doctor actually said.
 - The Assessment is the most important section. It must reflect the doctor's actual clinical thinking and reasoning as expressed during the encounter. Write it with depth and nuance. Avoid generic or surface-level assessments. Use simple, direct language — for example write 'I do not think he has an epileptic disorder' instead of 'we have a fairly large amount of data pointing towards not having an epileptic problem'.
+- CRITICAL: The Assessment must distinguish between the doctor's clinical reasoning and the doctor's explanations to the family. When the doctor uses analogies, simplified explanations, or teaching language to help parents understand (like comparing epilepsy to diabetes, or explaining what a focal seizure is), that is FOR THE FAMILY and should NOT appear in the Assessment. The Assessment is a medical document for other physicians. Only include the doctor's actual clinical reasoning, differential diagnosis, and medical conclusions.
+- Do NOT include textbook explanations of conditions. If the doctor explains what focal seizures are or how they work during the encounter, do not put that explanation in the note. Just state the diagnosis or finding directly.
+- Do NOT include the doctor's responses to parent questions about non-clinical topics like diet, sodium, or lifestyle unless they are medically relevant to the diagnosis.
+- Write the Assessment as one physician writing to another physician. Keep it direct, clinical, and at the doctor's level of expertise. Not at the parent's level of understanding.
 
 PLAN:
 - Dash-style bullet points "- "
