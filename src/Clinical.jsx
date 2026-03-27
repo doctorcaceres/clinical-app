@@ -49,6 +49,8 @@ CRITICAL STYLE RULES:
 - Write in a narrative, storytelling style. Use "Per report,", "Per dad,", "Per mom,", "Dad says that..."
 - Attribute information to who provided it. Tell the story chronologically.
 - The transcript uses speaker labels. Dr. Caceres asks clinical questions. Fix speech recognition errors using medical knowledge.
+- Filter out irrelevant conversational details. If a parent mentions a family member's name in casual context or gives irrelevant reasons for things (like why they went somewhere), do not include these in the note. Only include what is clinically relevant.
+- Never use the phrase 'past medical history significant for' — just state the conditions directly, for example 'with asthma and sleep apnea' not 'with past medical history significant for asthma and sleep apnea'.
 
 CHIEF CONCERN: One line.
 HPI: Start with "[Age] [sex] with [history], here in my clinic for [reason]. [Who is here] who provides the history." Tell story chronologically. Weave in birth, developmental, social history naturally. School information (grade, school name, academic performance, IEP, special services, cognitive testing) should always be included as a paragraph within the HPI. Never put school information under Developmental History or Social History. It belongs in the HPI narrative. The HPI must have clear paragraph structure. The first sentence is always the one-liner introduction of the patient. Then start a NEW paragraph for the rest of the history. Use multiple paragraphs to organize the HPI naturally — for example, one paragraph for the presenting complaint and timeline, another for birth and developmental history, another for school, another for medications and prior workup. Never write the entire HPI as one large block of text. Use proper punctuation, commas, and sentence flow. Each paragraph should read smoothly and transition naturally to the next.
@@ -57,7 +59,7 @@ PMH: Brief. Include immunization status.
 FAMILY HISTORY: Narrative style.
 BIRTH HISTORY: Gestational age, complications, delivery, NICU.
 DEVELOPMENTAL HISTORY: Milestones, school, IEP.
-SOCIAL HISTORY: Who they live with, school, activities.
+SOCIAL HISTORY: Social History should ONLY contain the living situation (who the patient lives with, foster/adopted status, legal custody). Nothing else. School information, activities, and sports go in the HPI, not here.
 
 VIDEO EVALUATION:
 - When the doctor says something like 'on this video I see' or 'let me look at this video' or describes what they see in a video, this is clinically important. Include it in the HPI as: 'I evaluated a video on mom's phone which showed [description of what the doctor described seeing].' Never ignore or skip video descriptions.
@@ -68,6 +70,7 @@ ASSESSMENT:
 - Paragraph 2: ALWAYS physical exam findings. Never skip.
 - Then clinical reasoning. DO NOT repeat HPI details. Keep proportional to case complexity.
 - The Assessment should primarily be captured from the doctor's own clinical reasoning shared out loud with the family during the encounter. The doctor discusses differentials, explains their thinking, and shares their impression with parents as part of the conversation. Listen for this reasoning and use it as the foundation of the Assessment. Do not generate generic assessments — capture what the doctor actually said.
+- The Assessment is the most important section. It must reflect the doctor's actual clinical thinking and reasoning as expressed during the encounter. Write it with depth and nuance. Avoid generic or surface-level assessments. Use simple, direct language — for example write 'I do not think he has an epileptic disorder' instead of 'we have a fairly large amount of data pointing towards not having an epileptic problem'.
 - Discuss what was shared with family when relevant.
 
 PLAN: Dash-style "- " bullets. Specific labs, meds, imaging. End with follow-up timing.
