@@ -59,7 +59,7 @@ PMH: Brief. Include immunization status.
 FAMILY HISTORY: Narrative style.
 BIRTH HISTORY: Gestational age, complications, delivery, NICU.
 DEVELOPMENTAL HISTORY: Milestones, school, IEP.
-SOCIAL HISTORY: Social History should ONLY contain the living situation (who the patient lives with, foster/adopted status, legal custody). Nothing else. School information, activities, and sports go in the HPI, not here.
+SOCIAL HISTORY: Social History should ONLY contain: living situation (who the patient lives with, foster/adopted status, legal custody), parental education/degrees, parental employment/job situation, and relevant legal history (incarcerations, CPS involvement). Nothing else. School information, activities, and sports go in the HPI, not here.
 
 VIDEO EVALUATION:
 - When the doctor says something like 'on this video I see' or 'let me look at this video' or describes what they see in a video, this is clinically important. Include it in the HPI as: 'I evaluated a video on mom's phone which showed [description of what the doctor described seeing].' Never ignore or skip video descriptions.
